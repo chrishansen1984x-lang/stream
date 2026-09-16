@@ -176,10 +176,8 @@ final class PlaybackController {
     var nowPlayingTitle: String = "" {
         didSet { publishNowPlaying() }
     }
-    /// Source-opening timeout, allowing for slow remux startup.
-    private static let openTimeout: Duration = .seconds(45)
-    /// Shorter opening timeout when another ranked source is available.
-    private static let openTimeoutWithAlternates: Duration = .seconds(25)
+    /// Survives source teardown so fallback cannot restart the total budget.
+    private var startupBegan: ContinuousClock.Instant?
 
     private(set) var avPlayer: AVPlayer?
     private(set) var vlcPlayer: SwiftVLC.Player?
@@ -230,6 +228,7 @@ final class PlaybackController {
         // tried, so a counter reset here would always report one attempt.
         attempt: Int = 0
     ) {
+        if attempt == 0 || startupBegan == nil { startupBegan = .now }
         pendingAlternates = alternates
         rejectedSources = attempt
         if attempt == 0 { loadingNote = nil }
@@ -640,6 +639,9 @@ final class PlaybackController {
     /// gives out partway. False, with nothing changed, when the list is spent.
     @discardableResult
     private func stepToNextSource(startAt: Duration?, reason: String) -> Bool {
+        if let began = startupBegan, began.duration(to: .now) >= StartupPolicy.totalBudget {
+            return false
+        }
         guard let next = pendingAlternates.first else { return false }
         pendingAlternates.removeFirst()
         let attempted = rejectedSources + 1
@@ -754,6 +756,7 @@ final class PlaybackController {
                     }
                     if self.status == .loading {
                         self.watchdog?.cancel()
+                        self.startupBegan = nil
                         self.status = .playing
                     }
                     return
@@ -912,6 +915,7 @@ final class PlaybackController {
                     case .playing:
                         // Genuinely started, so the watchdog has nothing to catch.
                         self.watchdog?.cancel()
+                        self.startupBegan = nil
                         self.status = .playing
                     case .paused: self.status = .paused
                     case .buffering, .opening: self.status = .loading
@@ -1199,7 +1203,8 @@ final class PlaybackController {
 
     private func startOpenWatchdog() {
         watchdog?.cancel()
-        let budget = pendingAlternates.isEmpty ? Self.openTimeout : Self.openTimeoutWithAlternates
+        let elapsed = startupBegan?.duration(to: .now) ?? .zero
+        let budget = StartupPolicy.attemptBudget(elapsed: elapsed, hasAlternates: !pendingAlternates.isEmpty)
         watchdog = Task { @MainActor [weak self] in
             try? await Task.sleep(for: budget)
             guard let self, !Task.isCancelled, self.status == .loading else { return }
@@ -1212,7 +1217,8 @@ final class PlaybackController {
             // A source that never starts is not the film any more than a
             // placeholder is, so it is stepped past the same way.
             if self.stepToNextSource(startAt: self.currentResumePoint, reason: "open timed out") { return }
-            self.tailWatchdog?.cancel()
+            self.teardown()
+            self.failedBeforeDecoding = true
             self.status = .failed(
                 "This source did not start playing. It may be slow or unavailable — try another."
             )

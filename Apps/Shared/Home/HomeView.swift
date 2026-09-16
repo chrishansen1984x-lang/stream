@@ -685,10 +685,11 @@ struct HomeView: View {
     /// own Play button, which is worse than having no hero Play at all.
     private func playFeatured(_ item: MetaPreview) {
         Task {
-            let detail = await loadMeta(for: item)
+            let detail = item.type == .movie ? nil : await loadMeta(for: item)
 
             var videoId = item.id
-            var startAt: Duration?
+            let saved = model.watchState.progress(for: item.id)
+            var startAt: Duration? = item.type == .movie && saved?.isResumable == true ? saved?.position : nil
             var title = item.name
 
             if let detail {

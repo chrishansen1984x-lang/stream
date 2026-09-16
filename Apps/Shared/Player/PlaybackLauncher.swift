@@ -39,16 +39,8 @@ final class PlaybackLauncher {
     // list already refuses to do the same thing a few screens away. The spinner
     // says "Loading…" and nothing else.
 
-    /// How long to keep waiting for more sources once the first ones land.
-    ///
-    /// Play used to consume the resolver's whole stream before choosing, so every
-    /// press waited out `StreamResolver.deadline` — fifteen seconds — whenever a
-    /// single addon was slow to answer, which is most of the time. Addons are
-    /// independent servers with wildly different latency, and the fast ones are
-    /// usually the debrid aggregators that return the source actually worth
-    /// playing. This keeps the "best source is often not the first to arrive"
-    /// property while capping the wait at roughly first-response plus this.
-    private static let settleWindow: Duration = .seconds(3)
+    /// A short grace period for cached sources; longer for uncertain results.
+    private var settleDeadline: ContinuousClock.Instant?
 
     private var task: Task<Void, Never>?
     private var settle: Task<Void, Never>?
@@ -84,6 +76,7 @@ final class PlaybackLauncher {
         task?.cancel()
         settle?.cancel()
         settle = nil
+        settleDeadline = nil
         collected = []
         self.target = target
         phase = .resolving
@@ -124,15 +117,21 @@ final class PlaybackLauncher {
             }
             // Every addon answered before the window elapsed — decide now rather
             // than waiting out a timer with nothing left to wait for.
+            guard !Task.isCancelled else { return }
             self?.decide(preferences: preferences)
         }
     }
 
-    /// Starts the grace period, once, on the first usable batch.
+    /// Starts the grace period on usable results and shortens it when a cached source arrives.
     private func startSettling(preferences: RankingPreferences) {
-        guard settle == nil else { return }
+        guard let delay = StartupPolicy.selectionDelay(for: collected, preferences: preferences) else { return }
+        let deadline = ContinuousClock.now.advanced(by: delay)
+        if let existing = settleDeadline, existing <= deadline { return }
+        settleDeadline = deadline
+        settle?.cancel()
         settle = Task { @MainActor [weak self] in
-            try? await Task.sleep(for: Self.settleWindow)
+            do { try await ContinuousClock().sleep(until: deadline) }
+            catch { return }
             guard !Task.isCancelled else { return }
             self?.decide(preferences: preferences)
         }
@@ -178,6 +177,7 @@ final class PlaybackLauncher {
         task = nil
         settle?.cancel()
         settle = nil
+        settleDeadline = nil
         collected = []
         alternates = []
         phase = .idle
