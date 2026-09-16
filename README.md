@@ -2,7 +2,7 @@
 
 # Stream for Mac
 
-A native Mac app for browsing Stremio-compatible addons and playing their video sources. The Mac beta is free, and the app’s source is available under the MIT license.
+Stream is a free, open-source Mac app for browsing Stremio-compatible addons and playing their video sources. Download the Mac beta below, or [build it yourself](BUILDING.md) from this repository.
 
 **[Download Stream for Mac](https://streammac.itch.io/stream)** · [Report a bug](https://github.com/chrishansen1984x-lang/stream/issues/new/choose) · [Known issues](KNOWN-ISSUES.md)
 
