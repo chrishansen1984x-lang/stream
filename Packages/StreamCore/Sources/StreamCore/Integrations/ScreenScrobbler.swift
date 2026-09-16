@@ -14,7 +14,7 @@ import os
 public actor ScreenScrobbler {
 
     public struct Configuration: Sendable {
-        /// e.g. https://screen-api.chrishansen1984x.workers.dev/watch-events
+        /// The user-configured HTTPS endpoint for watch events.
         public var endpoint: URL
         /// A device token from Screen → Your year → Connected apps. Starts `scr_`.
         public var token: String

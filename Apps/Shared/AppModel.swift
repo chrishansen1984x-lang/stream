@@ -16,7 +16,7 @@ final class AppModel {
     let tmdb = TMDBClient()
     let trakt: TraktSync
     let remoteSync: RemoteSync
-    /// Reports completed playback to Screen. Nil when no token is configured.
+    /// Reports completed playback to Screen when a server URL and token are configured.
     private(set) var screen: ScreenScrobbler?
 
     /// Films in cinemas, which tvOS hides because none of them will play.
@@ -29,6 +29,14 @@ final class AppModel {
     var screenToken: String {
         didSet {
             lastScreenTokenWrite = Keychain.set(screenToken, for: Self.screenTokenKey)
+            configureScreen()
+        }
+    }
+
+    /// No default server: each user supplies their own Screen endpoint.
+    var screenEndpointURL: String {
+        didSet {
+            defaults.set(screenEndpointURL, forKey: Self.screenEndpointKey)
             configureScreen()
         }
     }
@@ -173,15 +181,14 @@ final class AppModel {
     private static let languageKey = "preferredLanguage"
     private static let screenLogger = Logger(subsystem: "com.stream.core", category: "Screen")
     private static let screenTokenKey = "screenDeviceToken"
-    private static let screenEndpoint = URL(
-        string: "https://screen-api.chrishansen1984x.workers.dev/watch-events"
-    )!
+    private static let screenEndpointKey = "screenEndpointURL"
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
         self.showsDiagnostics = defaults.bool(forKey: Self.diagnosticsKey)
         self.tmdbApiKey = defaults.string(forKey: Self.tmdbKey) ?? ""
         self.screenToken = Keychain.get(Self.screenTokenKey) ?? ""
+        self.screenEndpointURL = defaults.string(forKey: Self.screenEndpointKey) ?? ""
         self.preferredLanguage = defaults.string(forKey: Self.languageKey)
             ?? Locale.current.language.languageCode?.identifier ?? "en"
         // Shared across iPhone, Mac, and Apple TV via one iCloud key-value store.
@@ -270,12 +277,16 @@ final class AppModel {
     }
 
     private func configureScreen() {
-        guard !screenToken.isEmpty else {
+        guard !screenToken.isEmpty,
+              let endpoint = URL(string: screenEndpointURL.trimmingCharacters(in: .whitespacesAndNewlines)),
+              endpoint.scheme?.lowercased() == "https",
+              let host = endpoint.host, !host.isEmpty,
+              endpoint.user == nil, endpoint.password == nil else {
             screen = nil
             return
         }
         let configuration = ScreenScrobbler.Configuration(
-            endpoint: Self.screenEndpoint,
+            endpoint: endpoint,
             token: screenToken
         )
         if let screen {

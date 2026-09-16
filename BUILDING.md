@@ -47,7 +47,7 @@ Add your own addon manifest URLs in Settings. Stream installs Cinemeta for metad
 
 For iOS and tvOS device builds, choose your own bundle identifiers and signing team in Xcode. The development-team field is empty in this repository.
 
-The optional Screen integration contacts the developer-operated endpoint only when a token is configured. If you maintain a fork, review or replace that endpoint. For a personal sync worker, replace the placeholder KV namespace ID and configure your own secrets.
+The optional Screen integration is off by default. To use it, enable diagnostics to show the Screen settings, then enter your own HTTPS server URL and device token. No server address is bundled. For a personal sync worker, replace the placeholder KV namespace ID and configure your own secrets.
 
 Addon URLs can contain credentials. Keep personal configurations, tokens, and logs out of source control.
 

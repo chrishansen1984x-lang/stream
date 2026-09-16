@@ -349,7 +349,7 @@ struct AddonsView: View {
                 .padding(.vertical, 4)
 
             case .connected:
-                LabeledContent("Status", value: "Connected")
+                LabeledContent("Status", value: model.screen == nil ? "Enter a valid HTTPS server URL" : "Configured")
                 if let lastSync = model.trakt.lastSync {
                     LabeledContent("Last sync", value: lastSync.formatted(date: .omitted, time: .shortened))
                 }
@@ -384,7 +384,11 @@ struct AddonsView: View {
 
     @ViewBuilder
     private var screenSection: some View {
+        @Bindable var model = model
         Section {
+            TextField("Screen server URL (https://…/watch-events)", text: $model.screenEndpointURL)
+            Text("Optional. Enter your own Screen server URL and device token to send watch history. Leave the URL blank to keep this off.")
+                .settingsFootnote()
             // Two states, the same split Trakt uses: entry until it is configured,
             // then status and actions. Six rows for one setting — a field, a save,
             // a confirmation, a queue depth and two more buttons — was the whole
@@ -406,7 +410,7 @@ struct AddonsView: View {
                 Text("Screen → Your year → Connected apps → Create token.")
                     .settingsFootnote()
             } else {
-                LabeledContent("Status", value: "Connected")
+                LabeledContent("Status", value: model.screen == nil ? "Enter a valid HTTPS server URL" : "Configured")
                 LabeledContent("Waiting to send", value: "\(screenQueueDepth)")
                 LabeledContent("Last sent", value: screenLastSent)
                 if let failure = screenFailure {
