@@ -2,7 +2,7 @@
 
 # Stream for Mac
 
-A native Mac app for browsing Stremio-compatible addons and playing their video sources. The first beta is free, with optional tips to support development.
+A native Mac app for browsing Stremio-compatible addons and playing their video sources. The Mac beta is free, and the app’s source is available under the MIT license.
 
 **[Download Stream for Mac](https://streammac.itch.io/stream)** · [Report a bug](https://github.com/chrishansen1984x-lang/stream/issues/new/choose) · [Known issues](KNOWN-ISSUES.md)
 
@@ -45,13 +45,13 @@ Remove tokens, private addon URLs, account information, and signed media links f
 
 ## Support development
 
-Tips on [itch.io](https://streammac.itch.io/stream) help cover Apple Developer membership and continued development. Everyone gets the same features.
+If you’d like to help, optional tips on [itch.io](https://streammac.itch.io/stream) go toward Apple Developer membership and continued development. Everyone gets the same features.
 
 I also have iOS and tvOS versions ready to submit once the membership is funded. Apple’s approval isn’t guaranteed, and there’s no promised release date. A tip doesn’t guarantee an iOS or Apple TV release.
 
 ## Source and third-party libraries
 
-This repository contains release information, screenshots, and bug reports. Stream’s application source is private and is not licensed as open source.
+Stream’s application source is available under the [MIT license](LICENSE). See [BUILDING.md](BUILDING.md) for local builds and [THIRD-PARTY.md](THIRD-PARTY.md) before distributing binaries.
 
 Third-party libraries retain their own licenses. License notices are included in the app. The matching library sources, patches, build information, and relinking materials are available alongside the app on [itch.io](https://streammac.itch.io/stream):
 

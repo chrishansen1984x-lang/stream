@@ -1,5 +1,13 @@
 .DS_Store
+.build/
+node_modules/
+.wrangler/
+DerivedData/
+*.xcodeproj/
+*.xcworkspace/
+.env*
+.dev.vars*
 *.app/
 *.zip
 *.dmg
-.env*
+*.log

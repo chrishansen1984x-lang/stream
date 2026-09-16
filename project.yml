@@ -1,0 +1,181 @@
+name: Stream
+
+options:
+  bundleIdPrefix: com.stream
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "18.0"
+    tvOS: "18.0"
+    macOS: "15.0"
+
+packages:
+  StreamCore:
+    path: Packages/StreamCore
+  # libVLC 4.0 wrapped directly in Swift. Supplies the decode path AVPlayer lacks:
+  # MKV, DTS/TrueHD, and SSA/ASS subtitles.
+  SwiftVLC:
+    url: https://github.com/harflabs/SwiftVLC.git
+    exactVersion: 1.1.0-beta.8
+
+settings:
+  base:
+    MARKETING_VERSION: "1.0"
+    CURRENT_PROJECT_VERSION: "1"
+    SWIFT_VERSION: "6.0"
+    SWIFT_STRICT_CONCURRENCY: complete
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    # Set your own development team for device builds.
+    DEVELOPMENT_TEAM: ""
+    CODE_SIGN_STYLE: Automatic
+    # iCloud sync is written and ready, but Apple restricts the key-value-store
+    # entitlement to paid Developer Program members — a personal team cannot sign
+    # with it. Re-enable this line after enrolling and sync starts working.
+    # CODE_SIGN_ENTITLEMENTS: Apps/Shared/Stream.entitlements
+
+targets:
+  StreamiOS:
+    type: application
+    info:
+      path: Apps/iOS/Info.plist
+      properties:
+        # Lets the app be driven to a screen from outside — used by other apps
+        # handing off a title, and by scripts driving the tvOS build.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.chrishansen1984x.stream.deeplink
+            CFBundleURLSchemes: [stream]
+        # Stremio's local streaming server, and most self-hosted addons, serve
+        # over plain HTTP on the LAN. Only local addresses are exempted; remote
+        # traffic still requires TLS.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        # Required for any LAN request on iOS 14+ and tvOS 14+ — without it the
+        # request fails silently. ATS's local-networking exemption alone is not
+        # permission.
+        NSLocalNetworkUsageDescription: Stream connects to addons and media servers on your local network.
+    platform: iOS
+    sources:
+      - path: Apps/Shared
+        excludes: ["Stream.entitlements"]
+      - path: Apps/iOS
+    dependencies:
+      - package: StreamCore
+      - package: SwiftVLC
+    settings:
+      base:
+        PRODUCT_NAME: Stream
+        PRODUCT_BUNDLE_IDENTIFIER: com.chrishansen1984x.stream
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        TARGETED_DEVICE_FAMILY: "1,2"
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_UILaunchScreen_Generation: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Stream
+        INFOPLIST_KEY_UIUserInterfaceStyle: Dark
+        INFOPLIST_KEY_UISupportedInterfaceOrientations: "UIInterfaceOrientationPortrait UIInterfaceOrientationLandscapeLeft UIInterfaceOrientationLandscapeRight"
+        INFOPLIST_KEY_UIRequiresFullScreen: NO
+        # Playback must survive screen lock and backgrounding.
+        INFOPLIST_KEY_UIBackgroundModes: audio
+
+  StreamTV:
+    type: application
+    info:
+      path: Apps/tvOS/Info.plist
+      properties:
+        # Lets the app be driven to a screen from outside — used by other apps
+        # handing off a title, and by scripts driving the tvOS build.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.chrishansen1984x.stream.deeplink
+            CFBundleURLSchemes: [stream]
+        # Stremio's local streaming server, and most self-hosted addons, serve
+        # over plain HTTP on the LAN. Only local addresses are exempted; remote
+        # traffic still requires TLS.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        # Required for any LAN request on iOS 14+ and tvOS 14+ — without it the
+        # request fails silently. ATS's local-networking exemption alone is not
+        # permission.
+        NSLocalNetworkUsageDescription: Stream connects to addons and media servers on your local network.
+        # Lets the detail page ask whether the YouTube app is installed before
+        # offering a trailer button that would otherwise do nothing on a TV.
+        LSApplicationQueriesSchemes: [youtube]
+    platform: tvOS
+    sources:
+      - path: Apps/Shared
+        excludes: ["Stream.entitlements"]
+      - path: Apps/tvOS
+    dependencies:
+      - package: StreamCore
+      - package: SwiftVLC
+    settings:
+      base:
+        PRODUCT_NAME: Stream
+        PRODUCT_BUNDLE_IDENTIFIER: com.chrishansen1984x.stream.tv
+        # tvOS icons are layered brand assets, not a single image.
+        ASSETCATALOG_COMPILER_APPICON_NAME: App Icon & Top Shelf Image
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Stream
+        # Apple TV has no persistent local storage to speak of (AUDIT.md §4.3);
+        # this build relies on UserDefaults staying under that ceiling.
+        INFOPLIST_KEY_UIUserInterfaceStyle: Dark
+
+  StreamMac:
+    type: application
+    info:
+      path: Apps/macOS/Info.plist
+      properties:
+        # Windows are not reopened on launch. macOS otherwise restores the player
+        # with whatever it was showing when the app quit, so relaunching resumed
+        # the last thing watched on its own.
+        NSQuitAlwaysKeepsWindows: false
+        # Lets the app be driven to a screen from outside — used by other apps
+        # handing off a title, and by scripts driving the tvOS build.
+        CFBundleURLTypes:
+          - CFBundleURLName: com.chrishansen1984x.stream.deeplink
+            CFBundleURLSchemes: [stream]
+        # Stremio's local streaming server, and most self-hosted addons, serve
+        # over plain HTTP on the LAN. Only local addresses are exempted; remote
+        # traffic still requires TLS.
+        NSAppTransportSecurity:
+          NSAllowsLocalNetworking: true
+        # Required for any LAN request on iOS 14+ and tvOS 14+ — without it the
+        # request fails silently. ATS's local-networking exemption alone is not
+        # permission.
+        NSLocalNetworkUsageDescription: Stream connects to addons and media servers on your local network.
+    platform: macOS
+    sources:
+      - path: Apps/Shared
+        excludes: ["Stream.entitlements"]
+      - path: Apps/macOS
+    dependencies:
+      - package: StreamCore
+      - package: SwiftVLC
+    settings:
+      base:
+        PRODUCT_NAME: Stream
+        PRODUCT_BUNDLE_IDENTIFIER: com.chrishansen1984x.stream.mac
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        GENERATE_INFOPLIST_FILE: YES
+        INFOPLIST_KEY_CFBundleDisplayName: Stream
+        INFOPLIST_KEY_NSHumanReadableCopyright: ""
+        # Sandbox off for now: notarized Developer ID distribution is the macOS
+        # path (AUDIT.md §4.6), and outbound network needs an entitlement anyway.
+        # Required for notarisation, which is required for anyone outside the
+        # developer account to open the app without Gatekeeper refusing it.
+        ENABLE_HARDENED_RUNTIME: YES
+        CODE_SIGN_ENTITLEMENTS: Apps/macOS/Stream.entitlements
+
+schemes:
+  StreamiOS:
+    build:
+      targets: { StreamiOS: all }
+    run:
+      config: Debug
+  StreamTV:
+    build:
+      targets: { StreamTV: all }
+    run:
+      config: Debug
+  StreamMac:
+    build:
+      targets: { StreamMac: all }
+    run:
+      config: Debug

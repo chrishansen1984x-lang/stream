@@ -1,0 +1,21 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "stream-sync",
+  "main": "src/index.js",
+  "compatibility_date": "2026-08-01",
+  "observability": {
+    "enabled": true
+  },
+  "durable_objects": {
+    "bindings": [{ "name": "SYNC_STATE", "class_name": "SyncState" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["SyncState"] }],
+  "kv_namespaces": [
+    {
+      "binding": "STREAM_SYNC",
+      "id": "REPLACE_WITH_YOUR_KV_NAMESPACE_ID"
+    }
+  ]
+  // SYNC_TOKEN is a secret, not a var — set it with:
+  //   npx wrangler secret put SYNC_TOKEN
+}
