@@ -20,6 +20,36 @@ final class HomeViewModel {
         var id: String { source.id }
     }
 
+    struct ThemeShelf: Identifiable {
+        let theme: GenreTheme
+        var titles: [TMDBClient.TMDBTitle] = []
+        var isLoading = true
+        var failed = false
+        var id: String { theme.id }
+    }
+    private(set) var themeShelves: [ThemeShelf] = []
+    private var themeLoadID = UUID()
+
+    func loadThemes(genre: String?, tmdb: TMDBClient, apiKey: String) async {
+        let requestID = UUID()
+        themeLoadID = requestID
+        let themes = Array((genre.map(GenreTheme.themes(for:)) ?? []).prefix(4))
+        themeShelves = apiKey.isEmpty ? [] : themes.map { ThemeShelf(theme: $0) }
+        guard !apiKey.isEmpty else { return }
+        await withTaskGroup(of: (String, [TMDBClient.TMDBTitle]?).self) { group in
+            for theme in themes {
+                group.addTask { (theme.id, try? await tmdb.titles(for: theme, apiKey: apiKey)) }
+            }
+            for await (id, titles) in group {
+                guard !Task.isCancelled, themeLoadID == requestID else { group.cancelAll(); return }
+                guard let index = themeShelves.firstIndex(where: { $0.id == id }) else { continue }
+                themeShelves[index].titles = titles ?? []
+                themeShelves[index].failed = titles == nil
+                themeShelves[index].isLoading = false
+            }
+        }
+    }
+
     private(set) var shelves: [ShelfState] = []
     private(set) var featuredItems: [MetaPreview] = []
 
@@ -352,6 +382,7 @@ struct HomeView: View {
     /// killed the app every time. The toolbar has to be able to pop this first.
     @State private var detailAnchor: DeepLink.Anchor = .top
     @State private var heroIndex = 0
+    @State private var genreCategory = ""
     #if os(iOS)
     @State private var isShowingSettings = false
     #endif
@@ -420,19 +451,15 @@ struct HomeView: View {
                 tmdb: model.tmdb,
                 apiKey: model.tmdbApiKey
             )
-            // The pull, *then* the shelf. These used to run concurrently, which
-            // meant Continue watching was usually built from local records the
-            // remote merge had not landed in yet — progress finished on another
-            // device showed up one launch late, if at all.
+            // Finish service refresh before building the resume shelf.
             await model.syncOnLaunch()
             await refreshResumeShelf()
             await theatres
         }
         // Keeps Continue watching current while Home is on screen.
         //
-        // A pull only happened at launch and when the scene became active, so a
-        // device already sitting on Home never learned that another one had
-        // finished an episode — an Apple TV can stay on this screen for hours.
+        // iCloud updates watch state in the background; rebuild the shelf so an
+        // Apple TV left on Home picks up changes from another device.
         // The task is tied to the view, so nothing polls once Home goes away.
         .task {
             while !Task.isCancelled {
@@ -443,7 +470,6 @@ struct HomeView: View {
                 // task's own lifetime is the right gate — SwiftUI cancels it when
                 // Home goes away, and a suspended app does not run tasks at all.
                 guard !Task.isCancelled else { return }
-                await model.refreshRemoteState()
                 await refreshResumeShelf()
             }
         }
@@ -454,7 +480,11 @@ struct HomeView: View {
             viewModel.applyTheatrical(window)
         }
         .onChange(of: model.homeFilter) { _, filter in
+            genreCategory = ""
             applyFilter(filter)
+        }
+        .task(id: "\(viewModel.genre ?? "")|\(model.tmdbApiKey)") {
+            await viewModel.loadThemes(genre: viewModel.genre, tmdb: model.tmdb, apiKey: model.tmdbApiKey)
         }
         .task(id: currentHero?.id) {
             await viewModel.loadFeaturedDetail(
@@ -861,7 +891,6 @@ struct HomeView: View {
             metaName: entry.title,
             poster: entry.poster
         )
-        model.pushRemoteState()
         Task {
             await viewModel.buildResumeFeed(
                 watchState: model.watchState,
@@ -877,7 +906,6 @@ struct HomeView: View {
     /// choice syncs to the other devices like any other watch state.
     private func removeFromContinueWatching(_ entry: ResumeEntry) {
         model.watchState.clearTitle(metaId: entry.metaId)
-        model.pushRemoteState()
         Task {
             await viewModel.buildResumeFeed(
                 watchState: model.watchState,
@@ -956,8 +984,17 @@ struct HomeView: View {
                 if !isFiltered { inTheatresShelf }
                 #endif
 
-                ForEach(viewModel.shelves) { shelf in
-                    shelfView(shelf)
+                if let genre = viewModel.genre, !GenreTheme.themes(for: genre).isEmpty {
+                    GenreBrowser(genre: genre, selection: $genreCategory) { title in
+                        opener.open(title, tmdb: model.tmdb, apiKey: model.tmdbApiKey)
+                    }
+                    .id(genre)
+                }
+                if genreCategory.isEmpty {
+                    genreThemeShelves
+                    ForEach(viewModel.shelves) { shelf in
+                        shelfView(shelf)
+                    }
                 }
             }
             .padding(.bottom, 32)
@@ -965,7 +1002,45 @@ struct HomeView: View {
         .scrollIndicators(.never)
         .tvFullBleedHorizontal()
         .refreshable {
-            await viewModel.load(registry: model.registry, client: model.client, hiding: theatricalFilter)
+            await viewModel.load(registry: model.registry, client: model.client, genre: viewModel.genre, hiding: theatricalFilter)
+        }
+    }
+
+    @ViewBuilder
+    private var genreThemeShelves: some View {
+        if let genre = viewModel.genre, !GenreTheme.themes(for: genre).isEmpty {
+            if model.tmdbApiKey.isEmpty {
+                Text("Add your TMDB key in Settings to browse themed movie collections.")
+                    .font(.callout)
+                    .foregroundStyle(.secondary)
+                    .padding(.horizontal)
+            } else {
+                ForEach(viewModel.themeShelves) { shelf in
+                    if shelf.isLoading || shelf.failed || !shelf.titles.isEmpty {
+                        Shelf(title: shelf.theme.title) {
+                            if shelf.isLoading {
+                                ShelfSkeleton()
+                            } else if shelf.failed {
+                                VStack(alignment: .leading) {
+                                    Text("Couldn't load this collection.")
+                                    Button("Try again") {
+                                        Task { await viewModel.loadThemes(genre: viewModel.genre, tmdb: model.tmdb, apiKey: model.tmdbApiKey) }
+                                    }
+                                }
+                            } else {
+                                ForEach(shelf.titles) { title in
+                                    PosterButton(
+                                        width: Theme.Metrics.posterWidth,
+                                        caption: title.title,
+                                        artwork: { RemoteImage(url: title.posterURL, title: title.title) },
+                                        action: { opener.open(title, tmdb: model.tmdb, apiKey: model.tmdbApiKey) }
+                                    )
+                                }
+                            }
+                        }
+                    }
+                }
+            }
         }
     }
 

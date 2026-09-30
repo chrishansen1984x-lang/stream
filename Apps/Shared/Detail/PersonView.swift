@@ -1,52 +1,60 @@
 import SwiftUI
 import StreamCore
 
-/// A cast member's filmography.
-///
-/// TMDB credits are keyed on TMDB ids while the addon protocol is keyed on IMDb
-/// ids, so opening a title resolves the id first. That resolution is done lazily —
-/// only for the title actually tapped — rather than for all forty up front.
 struct PersonView: View {
     let person: TMDBClient.CastMember
-
     @Environment(AppModel.self) private var model
-    @Environment(\.dismiss) private var dismiss
-
-    @State private var credits: [TMDBClient.TMDBTitle] = []
+    @State private var profile: PersonProfile?
     @State private var isLoading = true
-    @State private var resolving: Int?
+    @State private var failed = false
+    @State private var biographyExpanded = false
+    @State private var role: PersonRole?
+    @State private var genreID: Int?
+    @State private var sort: FilmographySort = .popular
+    @State private var resolving: String?
     @State private var resolved: MetaPreview?
     @State private var resolutionFailed = false
+    @State private var loadAttempt = 0
+    @State private var openTask: Task<Void, Never>?
 
-    private let columns = [GridItem(.adaptive(minimum: Theme.Metrics.creditPosterWidth), spacing: 14, alignment: .top)]
+    private var credits: [PersonCredit] { profile?.credits ?? [] }
+    private var visibleCredits: [PersonCredit] {
+        PersonCredit.filtered(credits, role: role, genreID: genreID, sort: sort)
+    }
+    private var roles: [PersonRole] {
+        PersonRole.allCases.filter { candidate in credits.contains { $0.roles.contains(candidate) } }
+    }
+    private var genres: [Int] {
+        Set(credits.flatMap(\.genreIDs)).filter { PersonCredit.genreNames[$0] != nil }
+            .sorted { PersonCredit.genreNames[$0]! < PersonCredit.genreNames[$1]! }
+    }
+    private var portraitWidth: CGFloat { Theme.isTelevision ? 220 : 122 }
+    private var posterWidth: CGFloat {
+        #if os(macOS)
+        150
+        #else
+        Theme.isTelevision ? 210 : 140
+        #endif
+    }
+    private var columns: [GridItem] {
+        [GridItem(.adaptive(minimum: posterWidth), spacing: Theme.Metrics.posterSpacing, alignment: .top)]
+    }
 
     var body: some View {
-        // Pushed into the existing navigation stack rather than presented as a
-        // sheet: a filmography is a place you browse to and come back from, and a
-        // sheet on macOS reads as a separate window.
-        Group {
-            if isLoading {
-                ProgressView().frame(maxWidth: .infinity, maxHeight: .infinity)
-            } else if credits.isEmpty {
-                StateMessage(
-                    icon: "person.crop.circle",
-                    title: person.name,
-                    message: "No filmography available."
-                )
-            } else {
-                grid
+        ScrollView {
+            VStack(alignment: .leading, spacing: Theme.isTelevision ? 40 : 30) {
+                profileHeader
+                filmography
             }
+            .padding(Theme.Metrics.screenPadding)
+            .padding(.bottom, 40)
         }
         .themedBackground()
         .navigationTitle(person.name)
         .navigationBarTitleDisplayModeInline()
-        .navigationDestination(item: $resolved) { item in
-            DetailView(item: item)
-        }
-        .task {
-            credits = await model.tmdb.credits(personId: person.id, apiKey: model.tmdbApiKey)
-            isLoading = false
-        }
+        .navigationDestination(item: $resolved) { DetailView(item: $0) }
+        .task(id: loadAttempt) { await load() }
+        .onDisappear { openTask?.cancel(); resolving = nil }
         .alert("Not available", isPresented: $resolutionFailed) {
             Button("OK", role: .cancel) {}
         } message: {
@@ -54,78 +62,244 @@ struct PersonView: View {
         }
     }
 
-    private var grid: some View {
-        ScrollView {
-            LazyVGrid(columns: columns, alignment: .leading, spacing: 18) {
-                ForEach(credits) { credit in
-                    Button {
-                        open(credit)
-                    } label: {
-                        creditCard(credit)
-                    }
-                    .posterButtonStyle()
-                }
+    private var profileHeader: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(alignment: .top, spacing: Theme.isTelevision ? 36 : 26) {
+                portrait
+                profileText.frame(minWidth: 240, maxWidth: 760, alignment: .leading)
             }
-            .padding(Theme.Metrics.screenPadding)
+            VStack(alignment: .leading, spacing: 18) {
+                portrait
+                profileText
+            }
         }
-        .scrollIndicators(.never)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 
-    private func creditCard(_ credit: TMDBClient.TMDBTitle) -> some View {
+    private var portrait: some View {
+        Group {
+            if let url = profile?.profileURL ?? person.profileURL {
+                RemoteImage(url: url)
+            } else {
+                ZStack {
+                    Theme.Palette.surface
+                    Image(systemName: "person.fill")
+                        .font(.system(size: Theme.isTelevision ? 70 : 40))
+                        .foregroundStyle(Theme.Palette.tertiaryText)
+                }
+            }
+        }
+        .frame(width: portraitWidth, height: portraitWidth * 1.3)
+        .clipped()
+        .clipShape(RoundedRectangle(cornerRadius: 10))
+        .accessibilityHidden(true)
+    }
+
+    private var profileText: some View {
+        VStack(alignment: .leading, spacing: 12) {
+            if !profession.isEmpty {
+                Text(profession)
+                    .font(Theme.Typography.meta)
+                    .foregroundStyle(Theme.Palette.secondaryText)
+            }
+            Text(person.name)
+                .font(.system(size: Theme.isTelevision ? 48 : 34, weight: .bold))
+                .fixedSize(horizontal: false, vertical: true)
+            if let bio = profile?.biography, !bio.isEmpty {
+                Text(bio)
+                    .font(Theme.Typography.body)
+                    .foregroundStyle(Theme.Palette.secondaryText)
+                    .lineSpacing(4)
+                    .lineLimit(biographyExpanded ? nil : 3)
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    biographyExpanded.toggle()
+                } label: {
+                    Label(biographyExpanded ? "Show less" : "Read biography",
+                          systemImage: biographyExpanded ? "chevron.up" : "chevron.down")
+                }
+                .buttonStyle(.borderless)
+                .font(Theme.Typography.meta)
+                .accessibilityValue(biographyExpanded ? "Expanded" : "Collapsed")
+            }
+        }
+        .foregroundStyle(Theme.Palette.primaryText)
+        .frame(maxWidth: .infinity, alignment: .leading)
+    }
+
+    private var profession: String {
+        let names = roles.compactMap { role -> String? in
+            switch role {
+            case .acting: return "Actor"
+            case .directing: return "Director"
+            case .writing: return "Writer"
+            case .other: return nil
+            }
+        }
+        return names.isEmpty ? (profile?.department ?? "") : names.joined(separator: " · ")
+    }
+
+    @ViewBuilder
+    private var filmography: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            HStack {
+                Text("Filmography").font(Theme.isTelevision ? .title2.bold() : .title2.weight(.semibold))
+                Spacer()
+                if !isLoading && !failed {
+                    Text("\(visibleCredits.count) \(visibleCredits.count == 1 ? "title" : "titles")")
+                        .font(Theme.Typography.meta)
+                        .foregroundStyle(Theme.Palette.secondaryText)
+                }
+            }
+            if isLoading {
+                ProgressView().frame(maxWidth: .infinity, minHeight: 160)
+            } else if failed {
+                StateMessage(icon: "wifi.exclamationmark", title: "Couldn’t load filmography",
+                             message: "Check your connection and try again.",
+                             actionTitle: "Try again", action: { loadAttempt += 1 })
+            } else if credits.isEmpty {
+                Text("No filmography available.").foregroundStyle(Theme.Palette.secondaryText)
+            } else {
+                controls
+                if visibleCredits.isEmpty {
+                    StateMessage(icon: "line.3.horizontal.decrease", title: "No matching titles",
+                                 message: "Try another role or genre.", actionTitle: "Clear filters",
+                                 action: { role = nil; genreID = nil })
+                } else {
+                    LazyVGrid(columns: columns, alignment: .leading, spacing: 26) {
+                        ForEach(visibleCredits) { credit in
+                            Button { open(credit) } label: { creditCard(credit) }
+                                .posterButtonStyle()
+                                .disabled(resolving != nil)
+                                .accessibilityLabel("\(credit.title.title), \(credit.title.year ?? ""), \(credit.caption(for: role))")
+                                .help(credit.caption(for: role))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    private var controls: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 20) {
+                roleButtons.fixedSize()
+                Spacer(minLength: 10)
+                menus.fixedSize()
+            }
+            VStack(alignment: .leading, spacing: 16) {
+                ScrollView(.horizontal) { roleButtons }.scrollIndicators(.hidden)
+                menus
+            }
+        }
+    }
+
+    private var roleButtons: some View {
+        HStack(spacing: 6) {
+            roleButton(nil)
+            ForEach(roles, id: \.self) { roleButton($0) }
+        }
+    }
+
+    private func roleButton(_ value: PersonRole?) -> some View {
+        Button { role = value } label: {
+            Text(value?.rawValue ?? "All")
+                .font(Theme.Typography.body.weight(.medium))
+                .padding(.horizontal, Theme.isTelevision ? 20 : 12)
+                .padding(.vertical, Theme.isTelevision ? 14 : 8)
+                .background(role == value ? Theme.Palette.surfaceRaised : .clear, in: RoundedRectangle(cornerRadius: 8))
+                .foregroundStyle(role == value ? Theme.Palette.primaryText : Theme.Palette.secondaryText)
+        }
+        #if !os(tvOS)
+        .buttonStyle(.plain)
+        #endif
+        .accessibilityAddTraits(role == value ? .isSelected : [])
+    }
+
+    private var menus: some View {
+        HStack(spacing: 14) {
+            Menu {
+                Button { genreID = nil } label: { menuChoice("All genres", selected: genreID == nil) }
+                ForEach(genres, id: \.self) { id in
+                    Button { genreID = id } label: { menuChoice(PersonCredit.genreNames[id]!, selected: genreID == id) }
+                }
+            } label: {
+                Label(genreID.flatMap { PersonCredit.genreNames[$0] } ?? "All genres", systemImage: "chevron.down")
+            }
+            .accessibilityLabel("Genre")
+            .accessibilityValue(genreID.flatMap { PersonCredit.genreNames[$0] } ?? "All genres")
+            Menu {
+                ForEach(FilmographySort.allCases, id: \.self) { value in
+                    Button { sort = value } label: { menuChoice(value.rawValue, selected: sort == value) }
+                }
+            } label: { Label(sort.rawValue, systemImage: "chevron.down") }
+            .accessibilityLabel("Sort")
+            .accessibilityValue(sort.rawValue)
+        }
+        .font(Theme.Typography.body)
+        .menuStyle(.borderlessButton)
+    }
+
+    @ViewBuilder
+    private func menuChoice(_ title: String, selected: Bool) -> some View {
+        if selected { Label(title, systemImage: "checkmark") } else { Text(title) }
+    }
+
+    private func creditCard(_ credit: PersonCredit) -> some View {
         VStack(alignment: .leading, spacing: 6) {
             ZStack {
-                RemoteImage(url: credit.posterURL)
-                    .frame(width: Theme.Metrics.creditPosterWidth, height: Theme.Metrics.creditPosterWidth / Theme.Metrics.posterAspect)
-                    .clipShape(RoundedRectangle(cornerRadius: Theme.Metrics.posterCornerRadius, style: .continuous))
-
+                RemoteImage(url: credit.title.posterURL)
+                    .aspectRatio(Theme.Metrics.posterAspect, contentMode: .fit)
+                    .clipShape(RoundedRectangle(cornerRadius: Theme.Metrics.posterCornerRadius))
                 if resolving == credit.id {
-                    RoundedRectangle(cornerRadius: Theme.Metrics.posterCornerRadius, style: .continuous)
-                        .fill(.black.opacity(0.55))
-                    ProgressView().controlSize(.small).tint(.white)
+                    Theme.Palette.background.opacity(0.6)
+                    ProgressView().tint(.white)
                 }
             }
-
-            Text(credit.title)
-                .font(Theme.Typography.meta)
-                .fontWeight(.medium)
+            .aspectRatio(Theme.Metrics.posterAspect, contentMode: .fit)
+            .clipped()
+            Text(credit.title.title)
+                .font(Theme.Typography.body.weight(.semibold))
                 .foregroundStyle(Theme.Palette.primaryText)
                 .lineLimit(2, reservesSpace: true)
-                .multilineTextAlignment(.leading)
-
-            // Space is reserved whether or not a character name exists. Without
-            // this, cells differ in height and the grid rows stagger.
-            Text(credit.character?.isEmpty == false ? credit.character! : " ")
-                .font(Theme.Typography.fine)
-                .foregroundStyle(Theme.Palette.tertiaryText)
-                .lineLimit(1)
-                .frame(maxWidth: .infinity, alignment: .leading)
+            Text([credit.title.year, credit.title.isSeries ? "Series" : nil].compactMap { $0 }.joined(separator: " · "))
+                .font(Theme.Typography.meta)
+                .foregroundStyle(Theme.Palette.secondaryText)
+                .lineLimit(1, reservesSpace: true)
+            Text(credit.caption(for: role))
+                .font(Theme.Typography.meta)
+                .foregroundStyle(Theme.Palette.secondaryText)
+                .lineLimit(2, reservesSpace: true)
         }
-        .frame(width: Theme.Metrics.creditPosterWidth, alignment: .topLeading)
+        .multilineTextAlignment(.leading)
+        .frame(maxWidth: .infinity, alignment: .topLeading)
     }
 
-    private func open(_ credit: TMDBClient.TMDBTitle) {
+    private func load() async {
+        isLoading = true
+        failed = false
+        do {
+            let result = try await model.tmdb.personProfile(personId: person.id, apiKey: model.tmdbApiKey)
+            guard !Task.isCancelled else { return }
+            profile = result
+        } catch {
+            guard !Task.isCancelled else { return }
+            failed = true
+        }
+        isLoading = false
+    }
+
+    private func open(_ credit: PersonCredit) {
+        openTask?.cancel()
         resolving = credit.id
-        Task {
-            let imdbId = await model.tmdb.imdbId(
-                tmdbId: credit.id,
-                isSeries: credit.isSeries,
-                apiKey: model.tmdbApiKey
-            )
+        openTask = Task {
+            let title = credit.title
+            let imdbId = await model.tmdb.imdbId(tmdbId: title.id, isSeries: title.isSeries, apiKey: model.tmdbApiKey)
+            guard !Task.isCancelled else { return }
             resolving = nil
-
-            guard let imdbId else {
-                // Plenty of TMDB entries have no IMDb id, and the addon protocol
-                // cannot address those at all.
-                resolutionFailed = true
-                return
-            }
-
-            resolved = MetaPreview(
-                id: imdbId,
-                type: credit.isSeries ? .series : .movie,
-                name: credit.title,
-                year: credit.year
-            )
+            guard let imdbId else { resolutionFailed = true; return }
+            resolved = MetaPreview(id: imdbId, type: title.isSeries ? .series : .movie,
+                                   name: title.title, poster: title.posterURL?.absoluteString, year: title.year)
         }
     }
 }

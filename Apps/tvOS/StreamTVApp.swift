@@ -55,11 +55,8 @@ struct TVRootView: View {
                 // Only Home. Search and Settings host system text fields, which do
                 // not honour `disabled` for focus, and both are cheap to rebuild.
                 //
-                // Full bleed on Home alone: applying it to the whole stack stripped
-                // the top safe area from Search too, and Search needs it — that
-                // inset is what holds its results below the search field and
-                // keyboard. Without it the grid scrolled up underneath them and
-                // posters slid behind the letters.
+                // Search reserves toolbar space on its root page so pushed
+                // details can use the full screen for their backdrop.
                 HomeView()
                     .ignoresSafeArea(edges: .top)
                     .opacity(section == .home ? 1 : 0)
@@ -70,7 +67,7 @@ struct TVRootView: View {
                 case .home:
                     EmptyView()
                 case .search:
-                    SearchView().padding(.top, TVTopBar<EmptyView>.height)
+                    SearchView().ignoresSafeArea(edges: .top)
                 case .settings:
                     AddonsView().padding(.top, TVTopBar<EmptyView>.height)
                 }

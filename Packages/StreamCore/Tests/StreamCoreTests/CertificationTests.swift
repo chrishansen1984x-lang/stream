@@ -27,6 +27,89 @@ private final class TMDBStubProtocol: URLProtocol, @unchecked Sendable {
 @Suite("TMDB age classification", .serialized)
 struct CertificationTests {
 
+    @Test("Crew names retain their person IDs")
+    func crewIdentity() async {
+        TMDBStubProtocol.status = 200
+        TMDBStubProtocol.body = Data(#"{"credits":{"crew":[{"id":123,"name":"A Writer","job":"Writer"}]}}"#.utf8)
+        let result = await client().enrichment(tmdbId: 10, type: .movie, apiKey: "test")
+        #expect(result?.crew.first?.id == 123)
+        #expect(result?.crew.first?.character == "Writer")
+    }
+
+    @Test("Filmography includes crew work and keeps movie and TV IDs distinct")
+    func crewFilmography() async {
+        TMDBStubProtocol.status = 200
+        TMDBStubProtocol.body = Data(#"{"cast":[],"crew":[{"id":1,"title":"Film","media_type":"movie","job":"Director"},{"id":1,"title":"Film","media_type":"movie","job":"Writer"},{"id":1,"name":"Series","media_type":"tv","job":"Writer"}]}"#.utf8)
+        let credits = await client().credits(personId: 123, apiKey: "test")
+        #expect(credits.count == 2)
+        #expect(credits.contains { $0.isSeries })
+        #expect(credits.contains { !$0.isSeries })
+    }
+
+    @Test("Ambiguous names are not guessed")
+    func ambiguousPerson() async {
+        TMDBStubProtocol.status = 200
+        TMDBStubProtocol.body = Data(#"{"results":[{"id":1,"name":"Alex"},{"id":2,"name":"Alex"}]}"#.utf8)
+        let person = await client().person(named: "Alex", apiKey: "test")
+        #expect(person == nil)
+    }
+
+    @Test("Credit scene tags distinguish during, after, both, and unreported",
+          arguments: [[], [179430], [179431], [179430, 179431], [123]])
+    func creditScenes(ids: [Int]) async throws {
+        TMDBStubProtocol.status = 200
+        TMDBStubProtocol.body = try JSONSerialization.data(withJSONObject: ["keywords": ["keywords": ids.map { ["id": $0] }]])
+        let result = await client().enrichment(tmdbId: 10, type: .movie, apiKey: "test")
+        let expected: TMDBClient.CreditScenes? = ids.contains(179430)
+            ? (ids.contains(179431) ? .duringAndAfter : .after)
+            : (ids.contains(179431) ? .during : nil)
+        #expect(result?.creditScenes == expected)
+        let series = await client().enrichment(tmdbId: 10, type: .series, apiKey: "test")
+        #expect(series?.creditScenes == nil)
+    }
+
+    @Test("Person pages merge all roles, retain full credits, and combine filters")
+    func personFilmography() async throws {
+        TMDBStubProtocol.status = 200
+        var cast: [[String: Any]] = (1...45).map {
+            ["id": $0, "title": "Film \($0)", "media_type": "movie", "character": "Character",
+             "genre_ids": [35], "release_date": "2000-01-01", "popularity": Double($0)]
+        }
+        cast.append(["id": 1, "name": "Series", "media_type": "tv", "genre_ids": [18]])
+        TMDBStubProtocol.body = try JSONSerialization.data(withJSONObject: [
+            "biography": "A biography", "profile_path": "/portrait.jpg", "known_for_department": "Acting",
+            "combined_credits": ["cast": cast, "crew": [
+                ["id": 1, "title": "Film 1", "media_type": "movie", "job": "Director", "department": "Directing"],
+                ["id": 1, "title": "Film 1", "media_type": "movie", "job": "Screenplay", "department": "Writing"],
+                ["id": 2, "title": "Film 2", "media_type": "movie", "job": "Assistant Director", "department": "Directing"]
+            ]]
+        ])
+        let profile = try await client().personProfile(personId: 1, apiKey: "test")
+        #expect(profile.biography == "A biography")
+        #expect(profile.profileURL?.absoluteString == "https://image.tmdb.org/t/p/w342/portrait.jpg")
+        #expect(profile.credits.count == 46)
+        let film = try #require(profile.credits.first { $0.id == "movie:1" })
+        #expect(film.roles == [.acting, .directing, .writing])
+        #expect(film.caption(for: nil).contains("Screenplay"))
+        #expect(film.caption(for: .directing) == "Director")
+        let directedComedy = PersonCredit.filtered(profile.credits, role: .directing, genreID: 35, sort: .popular)
+        #expect(directedComedy.map(\.id) == ["movie:1"])
+        #expect(PersonCredit.filtered(profile.credits, role: .writing, genreID: 18, sort: .newest).isEmpty)
+        for sort in [FilmographySort.newest, .oldest] {
+            #expect(PersonCredit.filtered(profile.credits, role: nil, genreID: nil, sort: sort).last?.id == "tv:1")
+        }
+    }
+
+    @Test("Person page request failures remain errors, not empty filmographies")
+    func personRequestFailure() async {
+        TMDBStubProtocol.status = 503
+        defer { TMDBStubProtocol.status = 200 }
+        do {
+            _ = try await client().personProfile(personId: 1, apiKey: "test")
+            Issue.record("Expected failure")
+        } catch { }
+    }
+
     private func client() -> TMDBClient {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.protocolClasses = [TMDBStubProtocol.self]

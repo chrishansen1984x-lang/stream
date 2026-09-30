@@ -25,6 +25,7 @@ public final class AddonRegistry {
     private let defaults: UserDefaults
     private let storageKey: String
     private let cloud: CloudKeyValueStore?
+    private var recoveryKey: String { storageKey + ".cloudRecovery.v1" }
     private let logger = Logger(subsystem: "com.stream.core", category: "AddonRegistry")
 
     public init(
@@ -38,9 +39,26 @@ public final class AddonRegistry {
         load()
 
         if let cloud {
-            adopt(remote: cloud.data(forKey: storageKey))
+            let remote = cloud.data(forKey: storageKey)
+            // A fresh device could publish only the starter catalog before iCloud
+            // delivered the configured list. On the first launch of this version,
+            // keep a richer local snapshot when the cloud list is its strict subset.
+            // This is a one-time repair; ordinary later removals still sync.
+            if !defaults.bool(forKey: recoveryKey),
+               let remote,
+               let incoming = try? JSONDecoder().decode([Addon].self, from: remote),
+               incoming.count < addons.count,
+               incoming.allSatisfy({ item in addons.contains(where: { $0.id == item.id }) }) {
+                cloud.set(exportData(), forKey: storageKey)
+            } else {
+                adopt(remote: remote)
+            }
+            defaults.set(true, forKey: recoveryKey)
             cloud.observe(key: storageKey) { [weak self] data in
                 self?.adopt(remote: data)
+            }
+            if defaults.data(forKey: storageKey) != nil {
+                cloud.seedIfMissing(exportData(), forKey: storageKey)
             }
         }
     }
@@ -82,6 +100,14 @@ public final class AddonRegistry {
             addons.append(addon)
         }
         save()
+    }
+
+    /// First-run catalog only. It must not replace a configured cloud list while
+    /// iCloud is still fetching that list on a newly installed device.
+    public func installStarter(_ addon: Addon) {
+        guard addons.isEmpty else { return }
+        addons.append(addon)
+        persistLocally()
     }
 
     public func remove(_ addon: Addon) {

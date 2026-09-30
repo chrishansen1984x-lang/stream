@@ -99,6 +99,13 @@ final class PlaybackController {
 
     private(set) var audioTracks: [MediaTrack] = []
     private(set) var subtitleTracks: [MediaTrack] = []
+
+    var canDisableSubtitles: Bool {
+        switch engine {
+        case .avPlayer: avSubtitleGroup?.allowsEmptySelection ?? false
+        case .software: true
+        }
+    }
     /// Set once the *user* picks a track, so the automatic pass stops.
     private var hasUserChosenAudio = false
     /// The track set the automatic pass last ran against. libVLC discovers audio
@@ -144,6 +151,13 @@ final class PlaybackController {
     /// Where this item was asked to start, so a source that never opens can be
     /// replaced by the next one at the same point.
     private var currentResumePoint: Duration?
+    private var hasReportedPosition = false
+
+    /// An unopened source has no clock yet. Keep its requested resume point
+    /// when the user changes source or retries with another decoder.
+    var replacementPosition: Duration {
+        hasReportedPosition ? currentTime : (currentResumePoint ?? .zero)
+    }
     /// Loading message while trying fallback sources. Nil for the initial attempt.
     private(set) var loadingNote: String?
     /// Number of rejected sources, included in the failure message.
@@ -179,6 +193,9 @@ final class PlaybackController {
     /// Survives source teardown so fallback cannot restart the total budget.
     private var startupBegan: ContinuousClock.Instant?
 
+    private var avTrackTask: Task<Void, Never>?
+    private var avAudioGroup: AVMediaSelectionGroup?
+    private var avSubtitleGroup: AVMediaSelectionGroup?
     private(set) var avPlayer: AVPlayer?
     private(set) var vlcPlayer: SwiftVLC.Player?
 
@@ -255,6 +272,7 @@ final class PlaybackController {
         currentURL = url
         currentExpectedBytes = expectedBytes
         currentResumePoint = resumePoint
+        hasReportedPosition = false
         // Per session. The store adds this to whatever earlier sessions banked.
         playedSeconds = 0
         lastTick = nil
@@ -364,6 +382,7 @@ final class PlaybackController {
     func replaceItem(
         url: URL,
         engine newEngine: Engine,
+        startAt: Duration? = nil,
         expectedBytes: Int64? = nil,
         alternates: [PlaybackRequest.Alternate] = []
     ) {
@@ -373,6 +392,7 @@ final class PlaybackController {
         recoveredFrom = nil
         load(
             url: url,
+            startAt: startAt,
             expectedBytes: expectedBytes,
             alternates: alternates
         )
@@ -389,7 +409,7 @@ final class PlaybackController {
         // placeholder the preflight had just refused would play — and be written to
         // the library as the finished film.
         guard canRetryWithSoftwareEngine, let url = currentURL else { return }
-        let resumePoint = currentTime
+        let resumePoint = replacementPosition
         let bytes = currentExpectedBytes
         let remaining = pendingAlternates
         let attempted = rejectedSources
@@ -413,6 +433,12 @@ final class PlaybackController {
         eventTask = nil
         avStatusTask?.cancel()
         avStatusTask = nil
+        avTrackTask?.cancel()
+        avTrackTask = nil
+        avAudioGroup = nil
+        avSubtitleGroup = nil
+        audioTracks = []
+        subtitleTracks = []
 
         if let endObserver {
             NotificationCenter.default.removeObserver(endObserver)
@@ -565,6 +591,7 @@ final class PlaybackController {
     /// precise seek over HTTP has to fetch and decode from the preceding
     /// keyframe, which a drag issues faster than the demuxer can service.
     func seek(to target: Duration, fast: Bool = false) {
+        hasReportedPosition = true
         currentTime = target
         switch engine {
         case .avPlayer:
@@ -710,8 +737,12 @@ final class PlaybackController {
         timeObserver = player.addPeriodicTimeObserver(forInterval: interval, queue: .main) { [weak self] time in
             MainActor.assumeIsolated {
                 guard let self else { return }
+                if let item = player.currentItem, self.avAudioGroup != nil || self.avSubtitleGroup != nil {
+                    self.refreshAVTracks(item)
+                }
                 if !self.isScrubbing {
                     self.accumulatePlayed(to: .seconds(time.seconds))
+                    if time.seconds.isFinite, time.seconds > 0 { self.hasReportedPosition = true }
                     self.currentTime = .seconds(time.seconds)
                 }
                 if let seconds = player.currentItem?.duration.seconds, seconds.isFinite, seconds > 0 {
@@ -747,6 +778,7 @@ final class PlaybackController {
                     return
                 }
                 if item.status == .readyToPlay {
+                    self.loadAVTracks(for: item)
                     #if DEBUG
                     PlaybackClock.markOnce("av-ready", "AVPlayer readyToPlay")
                     #endif
@@ -773,6 +805,60 @@ final class PlaybackController {
         #if DEBUG
         PlaybackClock.mark("AVPlayer play() issued")
         #endif
+    }
+
+    private func loadAVTracks(for item: AVPlayerItem) {
+        avTrackTask?.cancel()
+        avTrackTask = Task { [weak self] in
+            let audio = try? await item.asset.loadMediaSelectionGroup(for: .audible)
+            let subtitles = try? await item.asset.loadMediaSelectionGroup(for: .legible)
+            guard let self, !Task.isCancelled, self.avPlayer?.currentItem === item else { return }
+            self.avAudioGroup = audio
+            self.avSubtitleGroup = subtitles
+            if !self.hasUserChosenAudio, let audio {
+                let candidates = audio.options.filter {
+                    Self.language($0.extendedLanguageTag ?? $0.locale?.languageCode, matches: self.preferredAudioLanguage)
+                }
+                // Prefer ordinary audio even when the provider labels the track
+                // by name rather than setting Apple's accessibility flag.
+                func score(_ option: AVMediaSelectionOption) -> Int {
+                    AudioTrackPreference.score(name: option.displayName)
+                        - (option.hasMediaCharacteristic(.describesVideoForAccessibility) ? 1_000 : 0)
+                }
+                let best = candidates.reduce(nil as AVMediaSelectionOption?) { best, candidate in
+                    guard let best else { return candidate }
+                    return score(candidate) > score(best) ? candidate : best
+                }
+                if let best { item.select(best, in: audio) }
+            }
+            self.refreshAVTracks(item)
+        }
+    }
+
+    private func refreshAVTracks(_ item: AVPlayerItem) {
+        func tracks(_ group: AVMediaSelectionGroup?, prefix: String) -> [MediaTrack] {
+            guard let group else { return [] }
+            let selected = item.currentMediaSelection.selectedMediaOption(in: group)
+            return group.options.enumerated().map { index, option in
+                let description = option.hasMediaCharacteristic(.describesVideoForAccessibility)
+                return MediaTrack(
+                    id: "\(prefix):\(index)",
+                    name: option.displayName + (description ? " (Audio description)" : ""),
+                    language: option.extendedLanguageTag ?? option.locale?.languageCode,
+                    isSelected: option == selected
+                )
+            }
+        }
+        let audio = tracks(avAudioGroup, prefix: "audio")
+        let subtitles = tracks(avSubtitleGroup, prefix: "subtitle")
+        if audioTracks != audio { audioTracks = audio }
+        if subtitleTracks != subtitles { subtitleTracks = subtitles }
+    }
+
+    private func avOption(id: String, prefix: String, group: AVMediaSelectionGroup) -> AVMediaSelectionOption? {
+        guard id.hasPrefix(prefix + ":"), let index = Int(id.dropFirst(prefix.count + 1)),
+              group.options.indices.contains(index) else { return nil }
+        return group.options[index]
     }
 
     // MARK: - Software (libVLC) path
@@ -927,6 +1013,7 @@ final class PlaybackController {
                 }
                 if let time = event.timeChanged, !self.isScrubbing {
                     self.accumulatePlayed(to: time)
+                    if time > .zero { self.hasReportedPosition = true }
                     self.currentTime = time
                 }
                 #if DEBUG
@@ -1456,6 +1543,13 @@ final class PlaybackController {
     }
 
     func selectAudioTrack(id: String) {
+        if let item = avPlayer?.currentItem, let group = avAudioGroup,
+           let option = avOption(id: id, prefix: "audio", group: group) {
+            hasUserChosenAudio = true
+            item.select(option, in: group)
+            refreshAVTracks(item)
+            return
+        }
         guard let player = vlcPlayer,
               let track = player.audioTracks.first(where: { $0.id == id })
         else { return }
@@ -1466,8 +1560,17 @@ final class PlaybackController {
     }
 
     func selectSubtitleTrack(id: String?) {
-        // AVPlayer has no equivalent, and `subtitleTracks` is only ever populated
-        // from libVLC — so on that path this is a no-op and the menu is empty.
+        if let item = avPlayer?.currentItem, let group = avSubtitleGroup {
+            if let id {
+                guard let option = avOption(id: id, prefix: "subtitle", group: group) else { return }
+                item.select(option, in: group)
+            } else {
+                guard group.allowsEmptySelection else { return }
+                item.select(nil, in: group)
+            }
+            refreshAVTracks(item)
+            return
+        }
         guard let player = vlcPlayer else { return }
         if let id {
             let match = player.subtitleTracks.first { $0.id == id }

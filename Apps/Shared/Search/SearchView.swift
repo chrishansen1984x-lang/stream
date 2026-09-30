@@ -1,93 +1,9 @@
 import SwiftUI
 import StreamCore
 
-@Observable
-@MainActor
-final class SearchViewModel {
-    private(set) var results: [MetaPreview] = []
-    private(set) var isSearching = false
-    private(set) var hasSearched = false
-    /// How many catalogs failed to answer the last search.
-    ///
-    /// Every failure used to collapse into an empty array, and the empty state then
-    /// stated as fact something it could not know — "No installed catalog matched
-    /// X" is a claim about the catalogs' *answers*, and with the network down there
-    /// were no answers. Counting them lets the screen say which of the two it is.
-    private(set) var failedSources = 0
-
-    private var currentTask: Task<Void, Never>?
-
-    /// Debounced search across every catalog that advertises `search` support.
-    func search(
-        query: String,
-        registry: AddonRegistry,
-        client: AddonClient,
-        hiding theatrical: TheatricalWindow = TheatricalWindow()
-    ) {
-        currentTask?.cancel()
-
-        let trimmed = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard trimmed.count >= 2 else {
-            results = []
-            hasSearched = false
-            isSearching = false
-            return
-        }
-
-        currentTask = Task {
-            // Debounce: users type faster than addons respond.
-            try? await Task.sleep(for: .milliseconds(350))
-            guard !Task.isCancelled else { return }
-
-            isSearching = true
-            let sources = registry.searchableCatalogs
-
-            var collected: [MetaPreview] = []
-            var failures = 0
-            // `[MetaPreview]?` rather than `[MetaPreview]`: nil is "did not answer",
-            // which an empty array cannot express and which the empty state needs.
-            await withTaskGroup(of: [MetaPreview]?.self) { group in
-                for source in sources {
-                    group.addTask {
-                        // `try?` on a non-optional return already gives an
-                        // optional; nil means the catalog did not answer.
-                        try? await client.catalog(
-                            from: source.addon,
-                            type: source.catalog.type,
-                            id: source.catalog.id,
-                            extra: [.search(trimmed)]
-                        ).metas
-                    }
-                }
-                for await batch in group {
-                    if let batch {
-                        collected.append(contentsOf: batch)
-                    } else {
-                        failures += 1
-                    }
-                }
-            }
-
-            guard !Task.isCancelled else { return }
-
-            // The same title often comes from several catalogs; keep first occurrence.
-            // Films still in cinemas are dropped first: searching for one and being
-            // offered a row that cannot play is worse than not finding it.
-            var seen = Set<String>()
-            results = collected
-                .filter { !theatrical.hides($0) }
-                .filter { seen.insert($0.id).inserted }
-
-            failedSources = failures
-            isSearching = false
-            hasSearched = true
-        }
-    }
-}
-
 struct SearchView: View {
     @Environment(AppModel.self) private var model
-    @State private var viewModel = SearchViewModel()
+    @State private var viewModel = CatalogSearchModel()
     @State private var query = ""
     @State private var selection: MetaPreview?
     /// macOS: focused on appear so Search means "start typing", not "click the
@@ -137,10 +53,16 @@ struct SearchView: View {
                 #if os(macOS)
                 searchField
                     .onAppear { isSearchFieldFocused = true }
+                #elseif os(tvOS)
+                tvSearchField
                 #endif
 
                 content
             }
+            #if os(tvOS)
+            .padding(.top, TVTopBar<EmptyView>.height)
+            .hiddenNavigationBar()
+            #endif
             .themedBackground()
             #if !os(tvOS)
             // tvOS draws a navigation title as large centred text in the same band
@@ -152,11 +74,11 @@ struct SearchView: View {
                 DetailView(item: item)
             }
         }
-        #if !os(macOS)
+        #if os(iOS)
         .searchable(text: $query, prompt: "Movies and series")
         #endif
         .onChange(of: query) { _, newValue in
-            viewModel.search(query: newValue, registry: model.registry, client: model.client, hiding: theatricalFilter)
+            viewModel.search(query: newValue, registry: model.registry, client: model.client)
         }
         .onChange(of: model.pendingLink, initial: true) { _, link in
             guard case .search(let incoming) = link else { return }
@@ -165,17 +87,8 @@ struct SearchView: View {
         }
     }
 
-    /// tvOS only — see `HomeView.theatricalFilter`.
-    private var theatricalFilter: TheatricalWindow {
-        #if os(tvOS)
-        model.theatrical
-        #else
-        TheatricalWindow()
-        #endif
-    }
-
     private func retry() {
-        viewModel.search(query: query, registry: model.registry, client: model.client, hiding: theatricalFilter)
+        viewModel.search(query: query, registry: model.registry, client: model.client)
     }
 
     /// The results stay mounted while a new search runs.
@@ -194,7 +107,13 @@ struct SearchView: View {
                 // Two different situations that used to read identically. Naming no
                 // addon keeps to the neutral-copy rule; stating a search found
                 // nothing when nothing answered does not.
-                if viewModel.failedSources > 0 {
+                if viewModel.sourceCount == 0 {
+                    StateMessage(
+                        icon: "magnifyingglass",
+                        title: "No search catalogs enabled",
+                        message: "Enable a catalog addon in Settings to search movies and series."
+                    )
+                } else if viewModel.failedSources > 0 {
                     StateMessage(
                         icon: "exclamationmark.triangle",
                         title: "Couldn’t search everything",
@@ -228,6 +147,24 @@ struct SearchView: View {
         .animation(.easeOut(duration: 0.15), value: viewModel.isSearching)
     }
 
+    #if os(tvOS)
+    // A regular TV text field uses the system text-entry screen. Unlike
+    // searchable on the NavigationStack, its keyboard cannot cover a pushed
+    // movie page, and the results have their own reserved layout space.
+    private var tvSearchField: some View {
+        TextField("Movies and series", text: $query)
+            .focused($isSearchFieldFocused)
+            .submitLabel(.search)
+            .onSubmit {
+                isSearchFieldFocused = false
+            }
+            .padding(.horizontal, Theme.Metrics.screenPadding)
+            .padding(.top, 20)
+            .padding(.bottom, 12)
+            .accessibilityLabel("Search movies and series")
+    }
+    #endif
+
     #if os(macOS)
     @ViewBuilder
     private var searchField: some View {
@@ -241,7 +178,7 @@ struct SearchView: View {
                 .font(.title3)
                 .foregroundStyle(Theme.Palette.primaryText)
                 .onSubmit {
-                    viewModel.search(query: query, registry: model.registry, client: model.client, hiding: theatricalFilter)
+                    viewModel.search(query: query, registry: model.registry, client: model.client)
                 }
 
             if !query.isEmpty {
@@ -269,7 +206,10 @@ struct SearchView: View {
                         width: gridPosterWidth,
                         caption: item.name,
                         artwork: { RemoteImage(string: item.poster, title: item.name) },
-                        action: { selection = item }
+                        action: {
+                            isSearchFieldFocused = false
+                            selection = item
+                        }
                     )
                     // Grid rows size to their tallest cell; without this, shorter
                     // cells stretch and their captions drift away from the poster.
@@ -285,5 +225,10 @@ struct SearchView: View {
         // above them and the column left edge looked ragged.
         .tvFullBleedHorizontal()
         .scrollIndicators(.never)
+        #if os(tvOS)
+        // TV scroll views allow focus effects outside their bounds. Keep the
+        // scrolling posters out of the fixed search field above this viewport.
+        .clipped()
+        #endif
     }
 }

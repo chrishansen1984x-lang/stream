@@ -34,10 +34,23 @@ public actor TMDBClient {
         }
     }
 
+    public enum CreditScenes: String, Hashable, Sendable {
+        case during, after, duringAndAfter
+
+        public var label: String {
+            switch self {
+            case .during: "Mid-credits scene"
+            case .after: "After-credits scene"
+            case .duringAndAfter: "Mid- & after-credits scenes"
+            }
+        }
+    }
+
     public struct Enrichment: Hashable, Sendable {
         /// TV networks, or production companies for films.
         public var companies: [Company] = []
         public var cast: [CastMember] = []
+        public var crew: [CastMember] = []
         public var tagline: String?
         /// Age classification for the viewer's own region — "PG-13", "TV-MA", "15".
         ///
@@ -45,6 +58,8 @@ public actor TMDBClient {
         /// Films and series report it under different keys and shapes, which is why
         /// the two are unpicked separately below.
         public var certification: String?
+        /// Nil means unreported, not confirmation that no extra scene exists.
+        public var creditScenes: CreditScenes?
     }
 
     /// A movie or series as TMDB describes it.
@@ -64,6 +79,93 @@ public actor TMDBClient {
             guard let posterPath else { return nil }
             return URL(string: "https://image.tmdb.org/t/p/w342\(posterPath)")
         }
+    }
+
+    private var themeCache: [String: (Date, [TMDBTitle])] = [:]
+
+    /// Keyword matches are exact so an unknown theme never becomes an unfiltered shelf.
+    public func titles(for theme: GenreTheme, apiKey: String) async throws -> [TMDBTitle] {
+        guard !apiKey.isEmpty else { return [] }
+        if let cached = themeCache[theme.id], Date().timeIntervalSince(cached.0) < 3600 {
+            return cached.1
+        }
+        let page = try await browse(theme: theme, apiKey: apiKey)
+        themeCache[theme.id] = (Date(), page.titles)
+        return page.titles
+    }
+
+    public struct MoviePage: Sendable {
+        public var titles: [TMDBTitle]
+        public var hasMore: Bool
+    }
+
+    public struct BrowseOptions: Hashable, Sendable {
+        public var sort = "popularity.desc"
+        public var decade = 0
+        public var runtime = 0
+        public var rating = 0
+        public init() {}
+        public var queryItems: [URLQueryItem] {
+            var result = [URLQueryItem(name: "sort_by", value: sort),
+                          URLQueryItem(name: "vote_count.gte", value: sort == "vote_average.desc" ? "100" : "10")]
+            if decade > 0 {
+                result.append(URLQueryItem(name: "primary_release_date.gte", value: "\(decade)-01-01"))
+            }
+            let today = String(ISO8601DateFormatter().string(from: Date()).prefix(10))
+            result.append(URLQueryItem(name: "primary_release_date.lte", value: decade > 0 ? min(today, "\(decade + 9)-12-31") : today))
+            if runtime > 0 {
+                result.append(URLQueryItem(name: "with_runtime.gte", value: "1"))
+                result.append(URLQueryItem(name: "with_runtime.lte", value: String(runtime)))
+            }
+            if rating > 0 { result.append(URLQueryItem(name: "vote_average.gte", value: String(rating))) }
+            return result
+        }
+    }
+
+    private var keywordIDs: [String: Int] = [:]
+
+    public func browse(theme: GenreTheme, options: BrowseOptions = .init(), page: Int = 1, apiKey: String) async throws -> MoviePage {
+        guard !apiKey.isEmpty else { return MoviePage(titles: [], hasMore: false) }
+        func fetch(_ path: String, _ query: [URLQueryItem]) async throws -> Data {
+            var url = URLComponents(string: "https://api.themoviedb.org/3/" + path)!
+            url.queryItems = [URLQueryItem(name: "api_key", value: apiKey)] + query
+            var request = URLRequest(url: url.url!)
+            request.timeoutInterval = 12
+            let (data, response) = try await session.data(for: request)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { throw URLError(.badServerResponse) }
+            return data
+        }
+        let keywordID: Int
+        if let cached = keywordIDs[theme.keyword] { keywordID = cached }
+        else {
+            struct Keywords: Decodable {
+                struct Entry: Decodable { let id: Int; let name: String }
+                let results: [Entry]
+            }
+            let data = try await fetch("search/keyword", [URLQueryItem(name: "query", value: theme.keyword)])
+            let keywords = try JSONDecoder().decode(Keywords.self, from: data)
+            guard let keyword = keywords.results.first(where: { $0.name.caseInsensitiveCompare(theme.keyword) == .orderedSame }) else {
+                return MoviePage(titles: [], hasMore: false)
+            }
+            keywordID = keyword.id
+            keywordIDs[theme.keyword] = keyword.id
+        }
+        try Task.checkCancellation()
+        let data = try await fetch("discover/movie", options.queryItems + [
+            URLQueryItem(name: "with_genres", value: String(theme.genreID)),
+            URLQueryItem(name: "with_keywords", value: String(keywordID)),
+            URLQueryItem(name: "include_adult", value: "false"),
+            URLQueryItem(name: "include_video", value: "false"),
+            URLQueryItem(name: "page", value: String(page))
+        ])
+        let payload = try JSONDecoder().decode(TMDBDiscoverResponse.self, from: data)
+        var seen = Set<Int>()
+        let titles = (payload.results ?? []).filter { seen.insert($0.id).inserted }.map {
+            TMDBTitle(id: $0.id, title: $0.title ?? $0.name ?? "Untitled", posterPath: $0.posterPath,
+                      year: $0.releaseDate.map { String($0.prefix(4)) }, character: nil, isSeries: false)
+        }
+        try Task.checkCancellation()
+        return MoviePage(titles: titles, hasMore: page < min(payload.totalPages ?? 1, 500))
     }
 
     private let session: URLSession
@@ -91,14 +193,12 @@ public actor TMDBClient {
         let cacheKey = "\(path)/\(tmdbId)"
         if let cached = cache[cacheKey] { return cached }
 
-        // `append_to_response` fetches credits *and* the age classification in the
-        // same round trip — the certification costs no extra request. The two media
-        // types publish it under different names.
+        // Fetch supplementary movie facts in the existing detail request.
         let ratings = type == .series ? "content_ratings" : "release_dates"
         var components = URLComponents(string: "https://api.themoviedb.org/3/\(path)/\(tmdbId)")
         components?.queryItems = [
             URLQueryItem(name: "api_key", value: apiKey),
-            URLQueryItem(name: "append_to_response", value: "credits,\(ratings)")
+            URLQueryItem(name: "append_to_response", value: type == .movie ? "credits,\(ratings),keywords" : "credits,\(ratings)")
         ]
         guard let url = components?.url else { return nil }
 
@@ -115,10 +215,11 @@ public actor TMDBClient {
                 companies: (payload.networks ?? payload.productionCompanies ?? [])
                     .map { Company(id: $0.id, name: $0.name, logoPath: $0.logoPath) },
                 cast: (payload.credits?.cast ?? [])
-                    .prefix(12)
                     .map { CastMember(id: $0.id, name: $0.name, character: $0.character, profilePath: $0.profilePath) },
+                crew: (payload.credits?.crew ?? []).map { CastMember(id: $0.id, name: $0.name, character: $0.job, profilePath: $0.profilePath) },
                 tagline: payload.tagline?.isEmpty == false ? payload.tagline : nil,
-                certification: payload.certification(for: Self.preferredRegion)
+                certification: payload.certification(for: Self.preferredRegion),
+                creditScenes: type == .movie ? payload.creditScenes : nil
             )
 
             cache[cacheKey] = result
@@ -131,6 +232,41 @@ public actor TMDBClient {
 }
 
 extension TMDBClient {
+    /// Search is only a fallback when title credits do not supply a person ID.
+    public func person(named name: String, apiKey: String) async -> CastMember? {
+        guard !apiKey.isEmpty else { return nil }
+        var url = URLComponents(string: "https://api.themoviedb.org/3/search/person")!
+        url.queryItems = [URLQueryItem(name: "api_key", value: apiKey), URLQueryItem(name: "query", value: name), URLQueryItem(name: "include_adult", value: "false")]
+        struct Response: Decodable { let results: [TMDBCastMember] }
+        do {
+            let (data, response) = try await session.data(from: url.url!)
+            guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else { return nil }
+            let matches = try JSONDecoder().decode(Response.self, from: data).results.filter {
+                $0.name.caseInsensitiveCompare(name) == .orderedSame
+            }
+            guard matches.count == 1, let person = matches.first else { return nil }
+            return CastMember(id: person.id, name: person.name, character: nil, profilePath: person.profilePath)
+        } catch { return nil }
+    }
+
+    public func personProfile(personId: Int, apiKey: String) async throws -> PersonProfile {
+        guard !apiKey.isEmpty else { throw URLError(.userAuthenticationRequired) }
+        var url = URLComponents(string: "https://api.themoviedb.org/3/person/\(personId)")!
+        url.queryItems = [URLQueryItem(name: "api_key", value: apiKey),
+                          URLQueryItem(name: "append_to_response", value: "combined_credits")]
+        var request = URLRequest(url: url.url!)
+        request.timeoutInterval = 15
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse, (200..<300).contains(http.statusCode) else {
+            throw URLError(.badServerResponse)
+        }
+        let payload = try JSONDecoder().decode(TMDBPersonResponse.self, from: data)
+        try Task.checkCancellation()
+        return PersonProfile(biography: payload.biography?.trimmingCharacters(in: .whitespacesAndNewlines),
+                             department: payload.knownForDepartment, profilePath: payload.profilePath,
+                             credits: payload.combinedCredits.merged)
+    }
+
     /// A person's filmography, most popular first.
     public func credits(personId: Int, apiKey: String) async -> [TMDBTitle] {
         guard !apiKey.isEmpty else { return [] }
@@ -143,28 +279,7 @@ extension TMDBClient {
             let (data, _) = try await session.data(from: url)
             let payload = try JSONDecoder().decode(TMDBCombinedCredits.self, from: data)
 
-            // A person often appears in one title more than once — several roles,
-            // or a movie and TV entry sharing an id. Duplicate ids in a SwiftUI
-            // ForEach produce undefined layout, so they are collapsed here.
-            var seen = Set<Int>()
-
-            return (payload.cast ?? [])
-                // Popularity ordering puts recognisable work first; TMDB's default
-                // ordering is essentially arbitrary.
-                .sorted { ($0.popularity ?? 0) > ($1.popularity ?? 0) }
-                .filter { seen.insert($0.id).inserted }
-                .prefix(40)
-                .map { entry in
-                    let date = entry.releaseDate ?? entry.firstAirDate
-                    return TMDBTitle(
-                        id: entry.id,
-                        title: entry.title ?? entry.name ?? "Untitled",
-                        posterPath: entry.posterPath,
-                        year: date.flatMap { $0.count >= 4 ? String($0.prefix(4)) : nil },
-                        character: entry.character,
-                        isSeries: entry.mediaType == "tv"
-                    )
-                }
+            return payload.merged.map(\.title)
         } catch {
             logger.debug("TMDB person credits failed for \(personId): \(error.localizedDescription)")
             return []
@@ -284,15 +399,63 @@ extension TMDBClient {
 
 // MARK: - Wire format
 
+private struct TMDBPersonResponse: Decodable {
+    var biography: String?
+    var knownForDepartment: String?
+    var profilePath: String?
+    var combinedCredits: TMDBCombinedCredits
+    enum CodingKeys: String, CodingKey {
+        case biography
+        case knownForDepartment = "known_for_department"
+        case profilePath = "profile_path"
+        case combinedCredits = "combined_credits"
+    }
+}
+
 private struct TMDBCombinedCredits: Decodable {
     var cast: [TMDBCreditEntry]?
+    var crew: [TMDBCreditEntry]?
+
+    var merged: [PersonCredit] {
+        var result: [String: PersonCredit] = [:]
+        for (entries, isCast) in [(cast ?? [], true), (crew ?? [], false)] {
+            for entry in entries {
+                guard entry.mediaType == nil || entry.mediaType == "movie" || entry.mediaType == "tv" else { continue }
+                let isSeries = entry.mediaType == "tv"
+                let id = "\(isSeries ? "tv" : "movie"):\(entry.id)"
+                let date = (entry.releaseDate ?? entry.firstAirDate).flatMap { $0.count >= 4 ? $0 : nil }
+                let role: PersonRole = isCast ? .acting : PersonCredit.role(for: entry.job, department: entry.department)
+                var credit = result[id] ?? PersonCredit(
+                    title: TMDBClient.TMDBTitle(id: entry.id, title: entry.title ?? entry.name ?? "Untitled",
+                        posterPath: entry.posterPath, year: date.map { String($0.prefix(4)) },
+                        character: entry.character ?? entry.job, isSeries: isSeries),
+                    roles: [], characters: [], jobs: [], genreIDs: [], popularity: 0, releaseDate: date)
+                credit.roles.insert(role)
+                credit.genreIDs.formUnion(entry.genreIDs ?? [])
+                credit.popularity = max(credit.popularity, entry.popularity ?? 0)
+                if credit.releaseDate == nil { credit.releaseDate = date; credit.title.year = date.map { String($0.prefix(4)) } }
+                if credit.title.posterPath == nil { credit.title.posterPath = entry.posterPath }
+                if isCast, let character = entry.character?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !character.isEmpty, !credit.characters.contains(character) { credit.characters.append(character) }
+                if !isCast, let job = entry.job?.trimmingCharacters(in: .whitespacesAndNewlines),
+                   !job.isEmpty, !credit.jobs.contains(job) { credit.jobs.append(job) }
+                result[id] = credit
+            }
+        }
+        return PersonCredit.filtered(Array(result.values), role: nil, genreID: nil, sort: .popular)
+    }
 }
 
 private struct TMDBDiscoverResponse: Decodable {
     var results: [TMDBCreditEntry]?
+    var totalPages: Int?
+    enum CodingKeys: String, CodingKey { case results; case totalPages = "total_pages" }
 }
 
 private struct TMDBCreditEntry: Decodable {
+    var job: String?
+    var department: String?
+    var genreIDs: [Int]?
     var id: Int
     var title: String?
     var name: String?
@@ -304,7 +467,8 @@ private struct TMDBCreditEntry: Decodable {
     var popularity: Double?
 
     private enum CodingKeys: String, CodingKey {
-        case id, title, name, character, popularity
+        case id, title, name, character, popularity, job, department
+        case genreIDs = "genre_ids"
         case posterPath = "poster_path"
         case releaseDate = "release_date"
         case firstAirDate = "first_air_date"
@@ -327,9 +491,20 @@ private struct TMDBResponse: Decodable {
     var credits: TMDBCredits?
     var contentRatings: TMDBRegionList<TMDBContentRating>?
     var releaseDates: TMDBRegionList<TMDBReleaseDateGroup>?
+    var keywords: TMDBMovieKeywords?
+
+    var creditScenes: TMDBClient.CreditScenes? {
+        let ids = Set((keywords?.keywords ?? []).map(\.id))
+        switch (ids.contains(179431), ids.contains(179430)) {
+        case (true, true): return .duringAndAfter
+        case (true, false): return .during
+        case (false, true): return .after
+        case (false, false): return nil
+        }
+    }
 
     private enum CodingKeys: String, CodingKey {
-        case tagline, networks, credits
+        case tagline, networks, credits, keywords
         case productionCompanies = "production_companies"
         case contentRatings = "content_ratings"
         case releaseDates = "release_dates"
@@ -410,16 +585,25 @@ private struct TMDBCompany: Decodable {
 
 private struct TMDBCredits: Decodable {
     var cast: [TMDBCastMember]?
+    var crew: [TMDBCastMember]?
 }
 
 private struct TMDBCastMember: Decodable {
+    var job: String?
+    var department: String?
+    var genreIDs: [Int]?
     var id: Int
     var name: String
     var character: String?
     var profilePath: String?
 
     private enum CodingKeys: String, CodingKey {
-        case id, name, character
+        case id, name, character, job
         case profilePath = "profile_path"
     }
+}
+
+private struct TMDBMovieKeywords: Decodable {
+    struct Keyword: Decodable { var id: Int }
+    var keywords: [Keyword]?
 }

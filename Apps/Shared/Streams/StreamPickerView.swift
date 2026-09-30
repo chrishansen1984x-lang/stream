@@ -68,6 +68,7 @@ final class StreamPickerViewModel {
 
 struct StreamPickerView: View {
     let target: StreamTarget
+    var onSelect: ((RankedStream) -> Void)? = nil
 
     @Environment(AppModel.self) private var model
     @Environment(\.dismiss) private var dismiss
@@ -133,6 +134,11 @@ struct StreamPickerView: View {
 
             ForEach(visibleStreams) { stream in
                 Button {
+                    if let onSelect {
+                        onSelect(stream)
+                        dismiss()
+                        return
+                    }
                     playing = stream
                     #if os(macOS)
                     // Close the sheet. It is modal to the main window, so the
@@ -154,6 +160,7 @@ struct StreamPickerView: View {
                     )
                 }
                 .buttonStyle(.plain)
+                .disabled(onSelect != nil && stream.stream.playbackURL == nil)
                 .listRowBackground(Theme.Palette.surface)
             }
 

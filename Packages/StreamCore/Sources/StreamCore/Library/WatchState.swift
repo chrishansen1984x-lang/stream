@@ -285,8 +285,13 @@ public final class WatchStateStore {
             // Merge whatever iCloud already holds, then keep merging as other
             // devices report progress.
             merge(remote: cloud.data(forKey: storageKey))
-            cloud.observe(key: storageKey) { [weak self] data in
-                self?.merge(remote: data)
+            cloud.observe(key: storageKey) { [weak self, weak cloud] data in
+                guard let self else { return }
+                self.merge(remote: data)
+                if let merged = self.exportData() { cloud?.set(merged, forKey: storageKey) }
+            }
+            if defaults.data(forKey: storageKey) != nil, let data = exportData() {
+                cloud.set(data, forKey: storageKey)
             }
         }
     }
@@ -298,7 +303,9 @@ public final class WatchStateStore {
     /// synced last would erase the other's progress entirely.
     /// Snapshot for pushing to a remote backend.
     public func exportData() -> Data? {
-        try? JSONEncoder().encode(WatchProgressPayload(records: records, tombstones: tombstones))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        return try? encoder.encode(WatchProgressPayload(records: records, tombstones: tombstones.sorted { $0.id < $1.id }))
     }
 
     /// Merges a snapshot from any remote backend — iCloud or the sync Worker.

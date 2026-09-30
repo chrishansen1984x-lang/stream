@@ -76,8 +76,13 @@ public final class WatchlistStore {
 
         if let cloud {
             mergeRemote(cloud.data(forKey: storageKey))
-            cloud.observe(key: storageKey) { [weak self] data in
-                self?.mergeRemote(data)
+            cloud.observe(key: storageKey) { [weak self, weak cloud] data in
+                guard let self else { return }
+                self.mergeRemote(data)
+                if let merged = self.exportData() { cloud?.set(merged, forKey: storageKey) }
+            }
+            if defaults.data(forKey: storageKey) != nil, let data = exportData() {
+                cloud.set(data, forKey: storageKey)
             }
         }
     }
@@ -122,7 +127,9 @@ public final class WatchlistStore {
     // MARK: - Sync
 
     public func exportData() -> Data? {
-        try? JSONEncoder().encode(WatchlistPayload(entries: entries, tombstones: tombstones))
+        let encoder = JSONEncoder()
+        encoder.outputFormatting = .sortedKeys
+        return try? encoder.encode(WatchlistPayload(entries: entries.sorted { $0.id < $1.id }, tombstones: tombstones.sorted { $0.id < $1.id }))
     }
 
     /// Union by id, keeping the earlier `addedAt`, minus anything deleted since.
@@ -159,7 +166,7 @@ public final class WatchlistStore {
         }
 
         let merged = Array(byId.values)
-        guard Set(merged.map(\.id)) != Set(entries.map(\.id)) || stones != tombstones else { return }
+        guard Set(merged) != Set(entries) || stones != tombstones else { return }
         entries = merged
         tombstones = stones
         persistLocally()

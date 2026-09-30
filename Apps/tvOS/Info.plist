@@ -29,15 +29,15 @@
 	</array>
 	<key>CFBundleVersion</key>
 	<string>1</string>
+	<key>LSApplicationQueriesSchemes</key>
+	<array>
+		<string>youtube</string>
+	</array>
 	<key>NSAppTransportSecurity</key>
 	<dict>
 		<key>NSAllowsLocalNetworking</key>
 		<true/>
 	</dict>
-	<key>LSApplicationQueriesSchemes</key>
-	<array>
-		<string>youtube</string>
-	</array>
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Stream connects to addons and media servers on your local network.</string>
 </dict>

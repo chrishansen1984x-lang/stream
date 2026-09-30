@@ -1,111 +1,8 @@
 import SwiftUI
 import StreamCore
-
-/// Selects a playback engine from source metadata.
-enum PlaybackRouter {
-
-    /// Containers eligible for AVPlayer. Unknown containers use libVLC.
-    private static let avPlayerContainers: Set<String> = ["mp4", "m4v", "mov"]
-
-    /// Uses the addon filename, falling back to the playback URL extension.
-    /// Container and audio metadata are hints; PlaybackController handles runtime fallback.
-    static func engine(for item: RankedStream) -> PlaybackController.Engine {
-        let container = item.stream.behaviorHints?.containerExtension
-            ?? item.stream.playbackURL.flatMap { $0.pathExtension.isEmpty ? nil : $0.pathExtension.lowercased() }
-
-        guard let container, avPlayerContainers.contains(container) else {
-            return .software
-        }
-        if item.attributes.audioCodec?.requiresSoftwareDecode == true {
-            return .software
-        }
-        return .avPlayer
-    }
-}
-
-/// A resolved source, reduced to what playback actually needs.
-///
-/// `Codable`/`Hashable` because macOS opens the player as a separate window scene,
-/// and SwiftUI requires window values to round-trip through state restoration.
-struct PlaybackRequest: Codable, Hashable, Identifiable {
-    var url: URL
-    var title: String
-    var preferSoftware: Bool
-    /// Identity for watch tracking, carried through so the player can record
-    /// progress without needing to reach back into the detail screen.
-    var videoId: String
-    var metaId: String
-    var type: MediaType
-    var startAt: Duration?
-    var metaName: String?
-    var poster: String?
-    /// Advertised source size, used by preflight to detect placeholder clips.
-    var expectedBytes: Int64?
-    /// Remaining sources in ranked order for automatic fallback, including
-    /// when preflight detects a playable provider error clip.
-    var alternates: [Alternate] = []
-
-    struct Alternate: Codable, Hashable, Sendable {
-        var url: URL
-        var expectedBytes: Int64?
-        var preferSoftware: Bool
-    }
-
-    var id: String { url.absoluteString }
-
-    #if DEBUG
-    /// Creates a request with placeholder tracking fields for the `stream://play` debug link.
-    init(previewing url: URL, title: String, software: Bool = false, startAt: Duration? = nil) {
-        self.url = url
-        self.title = title
-        self.preferSoftware = software
-        self.startAt = startAt
-        self.videoId = "preview"
-        self.metaId = "preview"
-        self.type = .movie
-    }
-    #endif
-
-    init?(stream: RankedStream, context: PlaybackContext, alternates: [RankedStream] = []) {
-        guard let url = stream.stream.playbackURL else { return nil }
-        self.url = url
-        self.title = context.title
-        self.preferSoftware = PlaybackRouter.engine(for: stream) == .software
-        // `videoSize` only. `folderSize` is the whole torrent folder — a healthy
-        // episode measured at 15% of it, which a size check would reject.
-        self.expectedBytes = stream.stream.behaviorHints?.videoSize.map(Int64.init)
-        self.videoId = context.videoId
-        self.metaId = context.metaId
-        self.type = context.type
-        self.startAt = context.startAt
-        self.metaName = context.metaName
-        self.poster = context.poster
-        // Deduplicate the selected source and alternates so fallback does not
-        // probe the same URL twice when multiple addons return it.
-        var seen: Set<URL> = [url]
-        self.alternates = alternates.compactMap { candidate in
-            guard let alternateURL = candidate.stream.playbackURL,
-                  seen.insert(alternateURL).inserted else { return nil }
-            return Alternate(
-                url: alternateURL,
-                expectedBytes: candidate.stream.behaviorHints?.videoSize.map(Int64.init),
-                preferSoftware: PlaybackRouter.engine(for: candidate) == .software
-            )
-        }
-    }
-}
-
-/// Everything the player needs that isn't the stream itself.
-struct PlaybackContext: Hashable {
-    var videoId: String
-    var metaId: String
-    var type: MediaType
-    var title: String
-    var startAt: Duration?
-    /// Snapshot for the continue-watching shelf, so it needs no metadata lookup.
-    var metaName: String?
-    var poster: String?
-}
+#if os(macOS)
+import AppKit
+#endif
 
 struct PlayerView: View {
     let request: PlaybackRequest
@@ -153,6 +50,10 @@ struct PlayerView: View {
     /// player opened on — auto-advance replaces this without a new window.
     @State private var active: PlaybackRequest
     @State private var isAdvancing = false
+    @State private var isShowingSources = false
+    #if os(macOS)
+    @State private var isTrackingMenu = false
+    #endif
 
     private var url: URL { active.url }
     private var title: String { active.title }
@@ -286,7 +187,7 @@ struct PlayerView: View {
         .onChange(of: areControlsVisible) { _, visible in
             // Not while an overlay owns the screen — its buttons are the only
             // things that should hold focus then.
-            guard !isFailed, !isAdvancing else { return }
+            guard !isFailed, !isAdvancing, !isShowingSources else { return }
             focus = visible ? .scrubber : .surface
         }
         #endif
@@ -330,7 +231,30 @@ struct PlayerView: View {
             }
         }
         #if os(tvOS)
-        .sheet(isPresented: $isShowingTracks) { trackChooser }
+        .sheet(isPresented: $isShowingTracks, onDismiss: {
+            revealControls()
+            focus = .playPause
+        }) { trackChooser }
+        #endif
+        .sheet(isPresented: $isShowingSources, onDismiss: { revealControls() }) {
+            StreamPickerView(
+                target: StreamTarget(type: active.type, videoId: active.videoId,
+                                     metaId: active.metaId, title: active.title),
+                onSelect: { switchSource(to: $0) }
+            )
+            .environment(model)
+            .presentationDetents([.medium, .large])
+            .sheetSize()
+        }
+        #if os(macOS)
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didBeginTrackingNotification)) { _ in
+            isTrackingMenu = true
+            hideTask?.cancel()
+        }
+        .onReceive(NotificationCenter.default.publisher(for: NSMenu.didEndTrackingNotification)) { _ in
+            isTrackingMenu = false
+            scheduleControlsHide()
+        }
         #endif
         .onDisappear {
             hideTask?.cancel()
@@ -400,7 +324,13 @@ struct PlayerView: View {
     private var trackChooser: some View {
         NavigationStack {
             List {
-                if controller.audioTracks.count > 1 {
+                if controller.audioTracks.isEmpty {
+                    Text("Audio track selection is unavailable for this playback.")
+                }
+                if controller.subtitleTracks.isEmpty {
+                    Text("No selectable subtitles reported.")
+                }
+                if !controller.audioTracks.isEmpty {
                     Section {
                         ForEach(controller.audioTracks) { track in
                             trackRow(track.displayName, isSelected: track.isSelected) {
@@ -414,11 +344,13 @@ struct PlayerView: View {
 
                 if !controller.subtitleTracks.isEmpty {
                     Section {
-                        trackRow(
-                            "Off",
-                            isSelected: !controller.subtitleTracks.contains(where: \.isSelected)
-                        ) {
-                            controller.selectSubtitleTrack(id: nil)
+                        if controller.canDisableSubtitles {
+                            trackRow(
+                                "Off",
+                                isSelected: !controller.subtitleTracks.contains(where: \.isSelected)
+                            ) {
+                                controller.selectSubtitleTrack(id: nil)
+                            }
                         }
                         ForEach(controller.subtitleTracks) { track in
                             trackRow(track.displayName, isSelected: track.isSelected) {
@@ -431,6 +363,12 @@ struct PlayerView: View {
                 }
             }
             .themedBackground()
+            .navigationTitle("Audio and subtitles")
+            .toolbar {
+                ToolbarItem(placement: .cancellationAction) {
+                    Button("Done") { isShowingTracks = false }
+                }
+            }
         }
     }
 
@@ -511,9 +449,19 @@ struct PlayerView: View {
 
                 Spacer()
 
+                Button {
+                    hideTask?.cancel()
+                    isShowingSources = true
+                } label: {
+                    playerControlIcon("list.bullet")
+                }
+                .transportButtonStyle()
+                .accessibilityLabel("Change source")
+                .help("Change source")
+
                 // Multi-language releases frequently default to a track that is
                 // not the viewer's language, and there was no way to change it.
-                if controller.audioTracks.count > 1 || !controller.subtitleTracks.isEmpty {
+                Group {
                     #if os(tvOS)
                     // Not a `Menu` on the TV. `Menu` containing `Picker(.inline)`
                     // is a macOS/iOS pattern — `.menuStyle(.borderlessButton)` and
@@ -522,6 +470,7 @@ struct PlayerView: View {
                     // not draw as selectable or never committed. Every television
                     // player uses a plain focusable list; this is that.
                     Button {
+                        hideTask?.cancel()
                         isShowingTracks = true
                     } label: {
                         playerControlIcon("captions.bubble")
@@ -535,7 +484,13 @@ struct PlayerView: View {
                     // "Off". A menu with no indication of what is currently on reads
                     // as a menu that does not work. A `Picker` draws that itself.
                     Menu {
-                        if controller.audioTracks.count > 1 {
+                        if controller.audioTracks.isEmpty {
+                            Text("Audio track selection unavailable")
+                        }
+                        if controller.subtitleTracks.isEmpty {
+                            Text("No selectable subtitles reported")
+                        }
+                        if !controller.audioTracks.isEmpty {
                             Picker("Audio", selection: audioSelection) {
                                 ForEach(controller.audioTracks) { track in
                                     Text(track.displayName).tag(String?.some(track.id))
@@ -546,7 +501,9 @@ struct PlayerView: View {
 
                         if !controller.subtitleTracks.isEmpty {
                             Picker("Subtitles", selection: subtitleSelection) {
-                                Text("Off").tag(String?.none)
+                                if controller.canDisableSubtitles {
+                                    Text("Off").tag(String?.none)
+                                }
                                 ForEach(controller.subtitleTracks) { track in
                                     Text(track.displayName).tag(String?.some(track.id))
                                 }
@@ -871,6 +828,7 @@ struct PlayerView: View {
     /// guard and the episode kept its stale part-watched record.
     private func finishAndAdvance() async {
         guard !isAdvancing else { return }
+        isShowingSources = false
 
         model.watchState.markFinished(
             videoId: active.videoId,
@@ -880,7 +838,6 @@ struct PlayerView: View {
             metaName: active.metaName,
             poster: active.poster
         )
-        model.pushRemoteState()
 
         guard active.type == .series else {
             dismiss()
@@ -973,6 +930,26 @@ struct PlayerView: View {
         )
     }
 
+    private func switchSource(to stream: RankedStream) {
+        let position = controller.replacementPosition
+        guard let replacement = PlaybackRequest(
+            stream: stream,
+            context: PlaybackContext(videoId: active.videoId, metaId: active.metaId,
+                                     type: active.type, title: active.title,
+                                     startAt: position, metaName: active.metaName,
+                                     poster: active.poster)
+        ) else { return }
+        recordProgress()
+        active = replacement
+        didAutoRetry = false
+        controller.replaceItem(
+            url: replacement.url,
+            engine: replacement.preferSoftware ? .software : .avPlayer,
+            startAt: position,
+            expectedBytes: replacement.expectedBytes
+        )
+    }
+
     private func recordProgress(closing: Bool = false) {
         model.watchState.record(
             videoId: active.videoId,
@@ -1009,7 +986,6 @@ struct PlayerView: View {
                 didReportToScreen = model.reportProgressToScreen(saved)
             }
         }
-        model.pushRemoteState()
     }
 
     // MARK: - Auto-hide
@@ -1024,7 +1000,13 @@ struct PlayerView: View {
         // A failure or an auto-advance owns the screen and its buttons are the
         // only way out. Letting the timer run underneath them hid the controls,
         // which on tvOS moved focus off those buttons and stranded the user.
-        guard !isFailed, !isAdvancing else { return }
+        guard !isFailed, !isAdvancing, !isShowingSources else { return }
+        #if os(macOS)
+        guard !isTrackingMenu else { return }
+        #endif
+        #if os(tvOS)
+        guard !isShowingTracks else { return }
+        #endif
         hideTask = Task {
             try? await Task.sleep(for: .seconds(4))
             guard !Task.isCancelled else { return }

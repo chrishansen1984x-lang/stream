@@ -15,7 +15,6 @@ final class AppModel {
     let watchlist: WatchlistStore
     let tmdb = TMDBClient()
     let trakt: TraktSync
-    let remoteSync: RemoteSync
     /// Reports completed playback to Screen when a server URL and token are configured.
     private(set) var screen: ScreenScrobbler?
 
@@ -182,9 +181,17 @@ final class AppModel {
     private static let screenLogger = Logger(subsystem: "com.stream.core", category: "Screen")
     private static let screenTokenKey = "screenDeviceToken"
     private static let screenEndpointKey = "screenEndpointURL"
+    private static let legacySyncCleanupKey = "didRemoveLegacyServerSync"
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        // The retired server-sync fields could contain an addon manifest URL.
+        // They are not used for iCloud sync and must not trigger requests.
+        if !defaults.bool(forKey: Self.legacySyncCleanupKey) {
+            defaults.removeObject(forKey: "remoteSyncEndpoint")
+            Keychain.clear("remoteSyncToken")
+            defaults.set(true, forKey: Self.legacySyncCleanupKey)
+        }
         self.showsDiagnostics = defaults.bool(forKey: Self.diagnosticsKey)
         self.tmdbApiKey = defaults.string(forKey: Self.tmdbKey) ?? ""
         self.screenToken = Keychain.get(Self.screenTokenKey) ?? ""
@@ -198,7 +205,6 @@ final class AppModel {
         self.watchState = WatchStateStore(defaults: defaults, cloud: cloud)
         self.watchlist = WatchlistStore(defaults: defaults, cloud: cloud)
         self.trakt = TraktSync(defaults: defaults)
-        self.remoteSync = RemoteSync(defaults: defaults)
         let client = AddonClient()
         self.client = client
         self.resolver = StreamResolver(client: client)
@@ -214,15 +220,11 @@ final class AppModel {
         }
 
         observePreferenceSync()
+        if let local = defaults.data(forKey: Self.preferencesKey),
+           (try? JSONDecoder().decode(RankingPreferences.self, from: local)) != nil {
+            cloud.seedIfMissing(local, forKey: Self.preferencesKey)
+        }
 
-        // Any addon change now pushes, so installing on one device propagates
-        // without waiting for something unrelated to trigger a sync.
-        registry.onChange = { [weak self] in
-            self?.pushRemoteState()
-        }
-        watchlist.onChange = { [weak self] in
-            self?.pushRemoteState()
-        }
         // One place a watch becomes complete, so one place to report it from.
         watchState.onFinished = { [weak self] record in
             self?.reportToScreen(record)
@@ -375,7 +377,7 @@ final class AppModel {
         for urlString in DefaultAddons.firstRun {
             do {
                 let addon = try await client.installAddon(from: urlString)
-                registry.install(addon)
+                registry.installStarter(addon)
                 installedAny = true
             } catch {
                 lastError = "Could not install \(urlString): \(error.localizedDescription)"
@@ -389,14 +391,12 @@ final class AppModel {
         }
     }
 
-    /// Pulls every configured sync source. Safe on every launch — each no-ops when
-    /// it isn't set up, and the two are complementary rather than competing:
-    /// Trakt carries watch progress, the endpoint additionally carries addons and
-    /// preferences.
+    /// Refreshes connected services on launch. The library and preferences sync
+    /// through iCloud independently of this refresh.
     func syncOnLaunch() async {
         // Coalesced. The scene becoming active and Home's own task both ask for
-        // this at launch, which ran two remote pulls, two Trakt pulls and two
-        // TMDB requests at once. A second caller now joins the one in flight.
+        // this at launch, which ran duplicate Trakt and TMDB requests. A second
+        // caller now joins the one in flight.
         if let running = launchSync {
             await running.value
             return
@@ -410,20 +410,6 @@ final class AppModel {
     private var launchSync: Task<Void, Never>?
 
     private func performLaunchSync() async {
-        if remoteSync.isConfigured {
-            if let synced = await remoteSync.pull(
-                registry: registry,
-                watchState: watchState,
-                watchlist: watchlist,
-                currentPreferences: { self.preferences }
-            ), synced != preferences {
-                // Only when they actually differ. Assigning runs `didSet`, which
-                // saves and schedules a push — so a pull that changed nothing
-                // still uploaded, and on a timer that is a loop.
-                preferences = synced
-            }
-            if remoteSync.state == .idle, remoteSync.lastSync != nil { pushRemoteState() }
-        }
         if trakt.isConnected {
             await trakt.pull(into: watchState)
         }
@@ -441,41 +427,6 @@ final class AppModel {
         theatrical = TheatricalWindow(nowPlaying: await tmdb.nowPlaying(apiKey: tmdbApiKey))
     }
 
-    /// A lighter pull, for refreshing while the app is open.
-    ///
-    /// `syncOnLaunch` also pulls Trakt, which is a third-party API with its own
-    /// rate limits and no business being called every minute.
-    func refreshRemoteState() async {
-        guard remoteSync.isConfigured else {
-            #if DEBUG
-            PlaybackController.tracePlayback("sync: skipped — no endpoint or token configured")
-            #endif
-            return
-        }
-        if let synced = await remoteSync.pull(
-            registry: registry,
-            watchState: watchState,
-            watchlist: watchlist,
-            currentPreferences: { self.preferences }
-        ), synced != preferences {
-            preferences = synced
-        }
-        if remoteSync.state == .idle, remoteSync.lastSync != nil { pushRemoteState() }
-        #if DEBUG
-        PlaybackController.tracePlayback("sync: refreshed from the endpoint")
-        #endif
-    }
-
-    /// Uploads current state. Debounced inside `RemoteSync`.
-    func pushRemoteState() {
-        remoteSync.schedulePush(
-            registry: registry,
-            watchState: watchState,
-            watchlist: watchlist,
-            preferences: preferences
-        )
-    }
-
     func installAddon(from urlString: String) async throws {
         let addon = try await client.installAddon(from: urlString)
         registry.install(addon)
@@ -485,7 +436,6 @@ final class AppModel {
         guard let data = try? JSONEncoder().encode(preferences) else { return }
         defaults.set(data, forKey: Self.preferencesKey)
         cloud.set(data, forKey: Self.preferencesKey)
-        pushRemoteState()
     }
 
     /// Adopts preferences changed on another device. Last writer wins — ranking

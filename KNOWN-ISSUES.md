@@ -4,6 +4,7 @@
 - Descriptive audio without identifying metadata can still be selected incorrectly. Choose the regular soundtrack from the audio menu.
 - Seeking while paused was inconsistent in a silent MP4 test file using VLC. H.264/AAC and HLS test samples behaved correctly.
 - Competing edits to addon lists or preferences on different devices are last-writer-wins. First connection to an existing sync endpoint adopts its configuration before a sync baseline exists.
+- The ad-hoc signed GitHub Mac download does not have an iCloud key-value-store entitlement. iCloud sync needs a properly signed build with that entitlement; the app still keeps its data locally.
 - Automatic source selection and watched status sometimes need correcting. You can choose a source yourself or use Mark as watched.
 - Testing so far has focused on Apple silicon Macs. The Intel build compiles, but playback has not been tested on an Intel Mac.
 

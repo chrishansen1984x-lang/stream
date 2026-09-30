@@ -49,7 +49,7 @@ struct SourcePreflightTests {
     /// the change was exercised against a real file.
     @Test func slateIsDetectedByHostAndNotByFilename() {
         #expect(SourcePreflight.isProviderSlate(url("https://slate.elfhosted.com/cache/x/slate.mp4")))
-        #expect(!SourcePreflight.isProviderSlate(url("http://192.168.0.239:8899/slate.mp4")))
+        #expect(!SourcePreflight.isProviderSlate(url("http://192.0.2.1:8899/slate.mp4")))
         #expect(!SourcePreflight.isProviderSlate(url("https://store-026.wnam.tb-cdn.io/dld/abc")))
     }
 

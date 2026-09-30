@@ -1,10 +1,10 @@
 # Build Stream
 
-Stream shares SwiftUI code across macOS, iOS, and tvOS. The downloadable beta is for Mac. You can get it from [itch.io](https://streammac.itch.io/stream) without building anything.
+Stream shares SwiftUI code across macOS, iOS, and tvOS. The downloadable beta is for Mac. Get the current build from [GitHub Releases](https://github.com/chrishansen1984x-lang/stream/releases); the earlier download remains on [itch.io](https://streammac.itch.io/stream).
 
 ## Requirements
 
-- Xcode 26 or later. The clean Mac build was tested with Xcode 27.0 beta (27A5194q).
+- Xcode 26 or later. The Mac build was tested with Xcode 27.0 (27A5194q).
 - [XcodeGen](https://github.com/yonaskolb/XcodeGen), installed with `brew install xcodegen`.
 - macOS 15 or later for the Mac app. The iOS and tvOS targets require version 18 or later.
 
@@ -29,7 +29,7 @@ The Xcode project is generated from `project.yml`. Make project changes there, t
 swift test --package-path Packages/StreamCore --scratch-path /tmp/stream-core-tests
 ```
 
-The temporary build directory avoids a signing error caused by file metadata in some synced Documents folders. The clean source check passed 179 tests in 28 suites and an arm64 Mac Debug build. It did not test playback on Intel hardware or run the iOS and tvOS apps.
+The temporary build directory avoids a signing error caused by file metadata in some synced Documents folders. The updated source passed 213 core tests in 34 suites and a universal Mac Release build. iOS and tvOS builds are checked separately; playback on Intel hardware has not been tested.
 
 For the optional sync worker:
 
@@ -45,7 +45,7 @@ Its nine tests passed locally. See the [worker guide](Sync/worker/README.md) for
 
 Add your own addon manifest URLs in Settings. Stream installs Cinemeta for metadata on first launch; playback sources come from your configured addons. TMDB enrichment requires your own API key.
 
-For iOS and tvOS device builds, choose your own bundle identifiers and signing team in Xcode. The development-team field is empty in this repository.
+For iOS and tvOS device builds, choose your own bundle identifiers and signing team in Xcode. The development-team field is empty in this repository. iCloud sync requires a matching key-value-store entitlement and a supported signing profile; without them, data stays local.
 
 The optional Screen integration is off by default. To use it, enable diagnostics to show the Screen settings, then enter your own HTTPS server URL and device token. No server address is bundled. For a personal sync worker, replace the placeholder KV namespace ID and configure your own secrets.
 

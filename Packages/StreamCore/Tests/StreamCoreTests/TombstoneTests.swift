@@ -78,6 +78,21 @@ struct TombstoneTests {
         #expect(mac.contains("tt1") == false)
     }
 
+    @Test("Same-title timestamp reconciliation is persisted")
+    func sameTitleTimestampPersists() throws {
+        let suite = "tomb.timestamp.\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        let device = WatchlistStore(defaults: defaults)
+        let earlier = WatchlistEntry(meta: meta("tt1"), addedAt: Date(timeIntervalSince1970: 100))
+        let later = WatchlistEntry(meta: meta("tt1"), addedAt: Date(timeIntervalSince1970: 200))
+        device.mergeRemote(try JSONEncoder().encode([later]))
+        device.mergeRemote(try JSONEncoder().encode([earlier]))
+        #expect(device.sorted.first?.addedAt == earlier.addedAt)
+        let reloaded = WatchlistStore(defaults: defaults)
+        #expect(reloaded.sorted.first?.addedAt == earlier.addedAt)
+    }
+
     // MARK: - Watch progress after a removal
 
     private func watchStore(_ suite: String) -> WatchStateStore {

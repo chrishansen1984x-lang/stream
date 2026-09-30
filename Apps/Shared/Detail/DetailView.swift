@@ -137,7 +137,11 @@ struct DetailView: View {
     @State private var selection: MetaPreview?
     @State private var opener = TMDBTitleOpener()
     /// Cast member whose filmography is open.
+    @State private var personLookupFailed = false
+    @State private var resolvingPerson: String?
+    @State private var personLookupTask: Task<Void, Never>?
     @State private var selectedPerson: TMDBClient.CastMember?
+    @State private var showsAllCast = false
     /// Set only when the user explicitly asks to browse sources.
     @State private var browsingSources: StreamTarget?
     @State private var playing: RankedStream?
@@ -231,8 +235,16 @@ struct DetailView: View {
                 .presentationDetents([.medium, .large])
                 .sheetSize()
         }
+        .alert("Person unavailable", isPresented: $personLookupFailed) {
+            Button("OK", role: .cancel) {}
+        } message: {
+            Text(model.tmdbApiKey.isEmpty ? "Add your TMDB key in Settings to browse filmographies." : "Couldn't identify this person. Please try again later.")
+        }
         .navigationDestination(item: $selectedPerson) { person in
             PersonView(person: person)
+        }
+        .navigationDestination(isPresented: $showsAllCast) {
+            FullCastView(cast: viewModel.enrichment?.cast ?? [])
         }
         .presentPlayer(item: $playing, context: pendingContext, alternates: playingAlternates)
         .unavailableAlert(isPresented: $showsUnavailable)
@@ -308,16 +320,14 @@ struct DetailView: View {
                     details(meta)
                 }
 
-                if !viewModel.recommended.isEmpty || !viewModel.similar.isEmpty {
-                    similarSection
-                }
-
-                // Reference material, consulted rather than weighed, so it sits
-                // after the things that help you decide what to watch.
                 if let cast = viewModel.enrichment?.cast, !cast.isEmpty {
                     castRow(cast)
                         .padding(.horizontal, Theme.Metrics.screenPadding)
                         .padding(.top, 6)
+                }
+
+                if !viewModel.recommended.isEmpty || !viewModel.similar.isEmpty {
+                    similarSection
                 }
             }
             .padding(.bottom, 40)
@@ -467,25 +477,43 @@ struct DetailView: View {
                        spacing: Theme.isTelevision ? 44 : 18) {
                     titleMark
                         .fixedSize(horizontal: true, vertical: false)
+                    #if !os(macOS)
                     if let companies = viewModel.enrichment?.companies, !companies.isEmpty {
                         companyRow(companies)
                     }
+                    #endif
                 }
             }
 
             if let description = viewModel.meta?.description, !description.isEmpty {
                 Text(description)
-                    .font(Theme.Typography.body)
-                    .foregroundStyle(Theme.Palette.secondaryText)
-                    .lineSpacing(3)
-                    .lineLimit(3)
+                    .font(detailSynopsisFont)
+                    .foregroundStyle(Theme.Palette.primaryText.opacity(0.88))
+                    .lineSpacing(5)
+                    .lineLimit(4)
                     .fixedSize(horizontal: false, vertical: true)
-                    .frame(maxWidth: Theme.Metrics.readableWidth, alignment: .leading)
+                    .frame(maxWidth: detailSynopsisWidth, alignment: .leading)
             }
 
             metadataRow
             playControls
         }
+    }
+
+    private var detailSynopsisFont: Font {
+        #if os(macOS)
+        .system(size: 17)
+        #else
+        Theme.Typography.body
+        #endif
+    }
+
+    private var detailSynopsisWidth: CGFloat {
+        #if os(macOS)
+        600
+        #else
+        Theme.Metrics.readableWidth
+        #endif
     }
 
     /// What it is, and who it is for.
@@ -546,6 +574,32 @@ struct DetailView: View {
     /// rating, and a pill shape implies "tappable filter" when none of these are.
     /// The rating is the only element carrying real signal, so it stays highlighted.
     private var metadataRow: some View {
+        ViewThatFits(in: .horizontal) {
+            HStack(spacing: 14) {
+                movieFacts
+                creditSceneIndicator
+            }
+            .fixedSize(horizontal: true, vertical: false)
+
+            VStack(alignment: .leading, spacing: 8) {
+                movieFacts
+                creditSceneIndicator
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var creditSceneIndicator: some View {
+        if let scenes = viewModel.enrichment?.creditScenes {
+            Label(scenes.label, systemImage: "film")
+                .font(Theme.Typography.meta)
+                .foregroundStyle(Theme.Palette.secondaryText)
+                .fixedSize(horizontal: false, vertical: true)
+                .accessibilityLabel(scenes.label)
+        }
+    }
+
+    private var movieFacts: some View {
         let meta = viewModel.meta
         let facts = [
             meta?.yearLabel ?? item.yearLabel,
@@ -566,7 +620,7 @@ struct DetailView: View {
                 Text(facts.joined(separator: " · "))
                     .font(Theme.Typography.meta)
                     .foregroundStyle(Theme.Palette.secondaryText)
-                    .lineLimit(1)
+                    .lineLimit(2)
             }
         }
     }
@@ -755,6 +809,20 @@ struct DetailView: View {
             // Synopsis and companies now live in the hero; what remains below it
             // is credits, then episodes, with cast further down past `similar`.
             creditsGrid(meta)
+            #if os(macOS)
+            if let companies = viewModel.enrichment?.companies, !companies.isEmpty {
+                VStack(alignment: .leading, spacing: 6) {
+                    Text(meta.type == .series ? "NETWORKS" : "STUDIOS")
+                        .font(Theme.Typography.fine.weight(.semibold))
+                        .foregroundStyle(Theme.Palette.tertiaryText)
+                    Text(companies.map(\.name).joined(separator: " · "))
+                        .font(Theme.Typography.meta)
+                        .foregroundStyle(Theme.Palette.secondaryText)
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                .frame(maxWidth: Theme.Metrics.readableWidth, alignment: .leading)
+            }
+            #endif
 
             if meta.type == .series && !meta.seasons.isEmpty {
                 seasonSection(meta)
@@ -814,58 +882,29 @@ struct DetailView: View {
         .frame(height: markSize.height + 2, alignment: .leading)
     }
 
-    /// Cast with faces, which a comma-separated list can never be.
     private func castRow(_ cast: [TMDBClient.CastMember]) -> some View {
-        VStack(alignment: .leading, spacing: 10) {
-            Text("CAST")
-                .font(Theme.Typography.fine.weight(.semibold))
-                .tracking(0.6)
-                .foregroundStyle(Theme.Palette.tertiaryText)
-
+        VStack(alignment: .leading, spacing: 14) {
+            HStack {
+                Text("Cast")
+                    .font(Theme.Typography.title)
+                Spacer()
+                if cast.count > 12 {
+                    Button("See all") { showsAllCast = true }
+                        .buttonStyle(.plain)
+                        .font(Theme.Typography.body)
+                }
+            }
             ScrollView(.horizontal) {
-                // Room for the focused portrait to grow into. A ScrollView clips
-                // to its bounds, and with the row sized to the unfocused avatar the
-                // 1.08 lift pushed the ring's top arc and the whole drop shadow
-                // outside — cutting off the only focus indicator the row has now
-                // that the system plate is gone.
-                HStack(alignment: .top, spacing: 14) {
-                    ForEach(cast) { member in
-                        Button {
-                            selectedPerson = member
-                        } label: {
-                            VStack(spacing: 6) {
-                                RemoteImage(url: member.profileURL)
-                                    .frame(width: Theme.Metrics.castAvatar, height: Theme.Metrics.castAvatar)
-                                    .clipShape(Circle())
-                                    .modifier(CastAvatarRing())
-
-                                Text(member.name)
-                                    .font(Theme.Typography.fine.weight(.medium))
-                                    .foregroundStyle(Theme.Palette.primaryText)
-                                    .lineLimit(1)
-
-                                if let character = member.character, !character.isEmpty {
-                                    Text(character)
-                                        .font(Theme.Typography.fine)
-                                        .foregroundStyle(Theme.Palette.tertiaryText)
-                                        .lineLimit(1)
-                                }
-                            }
-                            .frame(width: Theme.Metrics.castColumn)
-                            .contentShape(Rectangle())
+                HStack(alignment: .top, spacing: 18) {
+                    ForEach(Array(cast.prefix(12))) { member in
+                        Button { selectedPerson = member } label: {
+                            CastPortraitCard(member: member)
                         }
-                        .buttonStyle(CastButtonStyle())
-                        #if os(tvOS)
-                        // Suppresses the system plate. The custom style draws the
-                        // focus itself; leaving both on stacked a rectangle behind
-                        // the ring.
-                        .focusEffectDisabled()
-                        #endif
+                        .buttonStyle(.plain)
                     }
                 }
-                .padding(.vertical, Theme.isTelevision ? 26 : 0)
+                .padding(.vertical, 4)
             }
-            .padding(.vertical, Theme.isTelevision ? -26 : 0)
             .scrollIndicators(.never)
         }
     }
@@ -876,6 +915,22 @@ struct DetailView: View {
     /// grid fills the row, reflows to the window, and keeps each value short enough
     /// to scan. No poster here — the backdrop already shows the artwork, and a
     /// second copy mid-page is redundant.
+    private func openPerson(_ name: String) {
+        personLookupTask?.cancel()
+        if let member = viewModel.enrichment?.crew.first(where: { $0.name.caseInsensitiveCompare(name) == .orderedSame }) {
+            resolvingPerson = nil
+            selectedPerson = member
+            return
+        }
+        resolvingPerson = name
+        personLookupTask = Task {
+            let person = await model.tmdb.person(named: name, apiKey: model.tmdbApiKey)
+            guard !Task.isCancelled else { return }
+            resolvingPerson = nil
+            if let person { selectedPerson = person } else { personLookupFailed = true }
+        }
+    }
+
     @ViewBuilder
     private func creditsGrid(_ meta: MetaDetail) -> some View {
         // Pared back deliberately. Cast is a clickable portrait row further down
@@ -885,7 +940,7 @@ struct DetailView: View {
         // whether you start the show at all.
         let facts: [(String, String)] = [
             ("Director", meta.director.joined(separator: ", ")),
-            ("Writer", meta.writer.prefix(2).joined(separator: ", ")),
+            ("Writer", meta.writer.joined(separator: ", ")),
             (meta.type == .series ? "Status" : "", meta.type == .series ? (meta.status ?? "") : "")
         ].filter { !$0.0.isEmpty && !$0.1.isEmpty }
 
@@ -904,10 +959,25 @@ struct DetailView: View {
                                 .font(Theme.Typography.fine.weight(.semibold))
                                 .tracking(0.6)
                                 .foregroundStyle(Theme.Palette.tertiaryText)
-                            Text(value)
-                                .font(Theme.Typography.meta)
-                                .foregroundStyle(Theme.Palette.secondaryText)
-                                .fixedSize(horizontal: false, vertical: true)
+                            if label == "Director" || label == "Writer" {
+                                let names = label == "Director" ? meta.director : meta.writer
+                                ForEach(Array(Set(names)).sorted(), id: \.self) { name in
+                                    Button { openPerson(name) } label: {
+                                        HStack(spacing: 6) {
+                                            Text(name).multilineTextAlignment(.leading)
+                                            if resolvingPerson == name { ProgressView().controlSize(.small) }
+                                        }
+                                    }
+                                    .buttonStyle(.plain)
+                                    .font(Theme.Typography.meta)
+                                    .foregroundStyle(Theme.Palette.secondaryText)
+                                    .help("Browse work by \(name)")
+                                }
+                            } else {
+                                Text(value)
+                                    .font(Theme.Typography.meta)
+                                    .foregroundStyle(Theme.Palette.secondaryText)
+                            }
                         }
                         .frame(maxWidth: .infinity, alignment: .leading)
                     }
@@ -1008,7 +1078,6 @@ struct DetailView: View {
                             } else {
                                 model.watchState.markUnwatched(videoId: episode.id)
                             }
-                            model.pushRemoteState()
                         }
                     )
                 }
@@ -1280,5 +1349,67 @@ extension View {
         #else
         self
         #endif
+    }
+}
+
+private struct CastPortraitCard: View {
+    let member: TMDBClient.CastMember
+    @Environment(\.isFocused) private var isFocused
+    static var columnWidth: CGFloat { Theme.isTelevision ? 220 : 130 }
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 6) {
+            RemoteImage(url: member.profileURL) {
+                ZStack {
+                    Theme.Palette.surface
+                    Image(systemName: "person.fill")
+                        .font(.system(size: 36))
+                        .foregroundStyle(.secondary)
+                }
+            }
+            .frame(width: Theme.isTelevision ? 180 : 100, height: Theme.isTelevision ? 252 : 140)
+            .clipShape(RoundedRectangle(cornerRadius: 9))
+            .overlay(RoundedRectangle(cornerRadius: 9).strokeBorder(isFocused ? Color.white : Theme.Palette.separator, lineWidth: isFocused ? 4 : 0.5))
+            Text(member.name)
+                .font(.system(size: Theme.isTelevision ? 24 : 14, weight: .semibold))
+                .foregroundStyle(Theme.Palette.primaryText)
+                .lineLimit(1)
+                .truncationMode(.tail)
+            if let character = member.character, !character.isEmpty {
+                Text(character)
+                    .font(.system(size: Theme.isTelevision ? 20 : 12))
+                    .foregroundStyle(Theme.Palette.secondaryText)
+                    .lineLimit(2)
+                .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+        .frame(width: Self.columnWidth, alignment: .leading)
+        .contentShape(Rectangle())
+        .help([member.name, member.character].compactMap { $0 }.joined(separator: " — "))
+        .accessibilityElement(children: .combine)
+    }
+}
+
+private struct FullCastView: View {
+    let cast: [TMDBClient.CastMember]
+    @State private var selectedPerson: TMDBClient.CastMember?
+
+    var body: some View {
+        ScrollView {
+            LazyVGrid(columns: [GridItem(.adaptive(minimum: CastPortraitCard.columnWidth), spacing: 18, alignment: .topLeading)], alignment: .leading, spacing: 24) {
+                ForEach(cast) { member in
+                    Button { selectedPerson = member } label: {
+                        CastPortraitCard(member: member)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+            .padding(Theme.Metrics.screenPadding)
+        }
+        .background(Theme.Palette.background)
+        .navigationTitle("Cast")
+        .navigationDestination(item: $selectedPerson) { person in
+            PersonView(person: person)
+        }
     }
 }

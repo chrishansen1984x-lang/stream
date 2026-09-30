@@ -37,16 +37,17 @@ enum Theme {
     /// Three roles only. Nothing content-bearing sits below `meta`, which is the
     /// smallest size that still scales acceptably with Dynamic Type.
     enum Typography {
-        // `.title2` is 48pt on tvOS against a 13pt headline on macOS — nearly
-        // 4x, which read as shouting rather than as the same design at viewing
-        // distance. `.title3` is 38pt, a little under 3x.
+        #if os(macOS)
+        static let title: Font = .system(size: 16, weight: .semibold)
+        static let body: Font = .system(size: 15)
+        static let meta: Font = .system(size: 13)
+        static let fine: Font = .system(size: 11)
+        #else
         static let title: Font = isTelevision ? .title3 : .headline
         static let body: Font = isTelevision ? .body : .subheadline
         static let meta: Font = isTelevision ? .callout : .caption
-
-        /// Smallest supporting text. On a TV nothing may go below `caption`, which
-        /// is already near the legibility floor at viewing distance.
         static let fine: Font = isTelevision ? .caption : .system(size: 10)
+        #endif
     }
 
     /// tvOS is viewed from across a room, not at arm's length, so everything is
@@ -113,7 +114,7 @@ enum Theme {
         /// keep `.infinity`: the list already constrains itself there, and a hard
         /// cap only strands content in landscape.
         #if os(macOS)
-        static let settingsWidth: CGFloat = 720
+        static let settingsWidth: CGFloat = 920
         #else
         static let settingsWidth: CGFloat = isTelevision ? 1000 : .infinity
         #endif
@@ -274,8 +275,13 @@ extension View {
             .textCase(.uppercase)
             .tracking(0.8)
             .foregroundStyle(Theme.Palette.secondaryText)
+        #elseif os(macOS)
+        self.font(.system(size: 14, weight: .semibold))
+            .textCase(nil)
+            .foregroundStyle(Theme.Palette.primaryText)
         #else
-        self
+        self.font(.subheadline.weight(.semibold))
+            .textCase(nil)
         #endif
     }
 

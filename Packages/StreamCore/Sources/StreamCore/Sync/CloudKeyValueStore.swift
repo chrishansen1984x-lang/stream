@@ -17,7 +17,7 @@ import os
 public final class CloudKeyValueStore {
     public static let shared = CloudKeyValueStore()
 
-    private let store = NSUbiquitousKeyValueStore.default
+    private let store: NSUbiquitousKeyValueStore
     private let logger = Logger(subsystem: "com.stream.core", category: "CloudSync")
     /// Never removed — this is a process-lifetime singleton, and a `deinit` that
     /// touches main-actor state cannot be expressed safely under strict concurrency.
@@ -30,18 +30,14 @@ public final class CloudKeyValueStore {
         handlers[key] = handler
     }
 
-    /// Whether iCloud sync is actually working.
-    ///
-    /// Checks two separate things, because they fail differently:
-    /// the ubiquity token is nil when signed out of iCloud, while `synchronize()`
-    /// returns false when the app lacks the key-value-store entitlement — which is
-    /// the case on a personal development team, since Apple restricts iCloud to
-    /// paid Developer Program memberships.
+    /// Account availability, not confirmation that a server upload completed.
     public var isAvailable: Bool {
         FileManager.default.ubiquityIdentityToken != nil && store.synchronize()
     }
 
-    private init() {
+    init(store: NSUbiquitousKeyValueStore = .default, observeChanges: Bool = true) {
+        self.store = store
+        guard observeChanges else { return }
         // Retained for the process lifetime — this is a singleton, so there is no
         // teardown, and a `deinit` touching main-actor state cannot be expressed
         // safely under strict concurrency.
@@ -67,8 +63,16 @@ public final class CloudKeyValueStore {
         store.data(forKey: key)
     }
 
+    /// Supplies an existing local setting without replacing a cloud value.
+    public func seedIfMissing(_ data: Data?, forKey key: String) {
+        guard let data, store.data(forKey: key) == nil else { return }
+        set(data, forKey: key)
+    }
+
     public func set(_ data: Data?, forKey key: String) {
-        guard isAvailable else { return }
+        // The system persists locally and forwards changes when iCloud becomes
+        // available. Gating writes on account/network state loses offline edits.
+        guard store.data(forKey: key) != data else { return }
         // KVS caps a single value at 1 MB. Silently exceeding it means the write is
         // dropped, so it is checked rather than discovered as missing sync later.
         if let data, data.count > 900_000 {

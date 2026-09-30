@@ -2,26 +2,24 @@
 
 # Stream for Mac
 
-Stream is a free, open-source Mac app for browsing Stremio-compatible addons and playing their video sources. Download the Mac beta below, or [build it yourself](BUILDING.md) from this repository.
+Stream is a free, open-source Mac app for browsing Stremio-compatible addons and playing their video sources. Download the current Mac beta from [GitHub Releases](https://github.com/chrishansen1984x-lang/stream/releases), get the existing download on [itch.io](https://streammac.itch.io/stream), or [build it yourself](BUILDING.md).
 
-**[Download Stream for Mac](https://streammac.itch.io/stream)** · [Report a bug](https://github.com/chrishansen1984x-lang/stream/issues/new/choose) · [Known issues](KNOWN-ISSUES.md)
+**[Download the current Mac beta](https://github.com/chrishansen1984x-lang/stream/releases)** · [itch.io download and optional tips](https://streammac.itch.io/stream) · [Report a bug](https://github.com/chrishansen1984x-lang/stream/issues/new/choose) · [Known issues](KNOWN-ISSUES.md)
 
-Requires **macOS 15 or newer**. The download includes Apple silicon and Intel versions. This beta is **unsigned and unnotarized**.
+Requires **macOS 15 or newer**. The download includes Apple silicon and Intel versions. This beta is **ad-hoc signed and unnotarized**.
 
 ## Download and install
 
-1. Open the [itch.io download page](https://streammac.itch.io/stream) and click **Download Now**.
-2. Choose **No thanks, just take me to the downloads** to download for free, or leave an optional tip.
-3. Download **Stream for Mac — unsigned beta (Apple silicon + Intel)**, about 45 MB. This is the only file you need to use the app.
-4. Unzip `Stream-Mac-Candidate.zip`, then move `Stream.app` to Applications and open it.
-5. If macOS blocks it because the developer cannot be verified, and you trust this download, follow [Apple’s instructions](https://support.apple.com/en-gb/102445) to open it through System Settings → Privacy & Security → Open Anyway.
-6. Open Stream’s Settings and add your compatible addon manifest URL.
+1. Download the latest `Stream-Mac-*.zip` from [GitHub Releases](https://github.com/chrishansen1984x-lang/stream/releases). You can still get the existing beta from [itch.io](https://streammac.itch.io/stream) for free or leave an optional tip.
+2. Unzip it, move `Stream.app` to Applications, and open it.
+3. If macOS blocks it because the developer cannot be verified, and you trust this download, follow [Apple’s instructions](https://support.apple.com/en-gb/102445) to open it through System Settings → Privacy & Security → Open Anyway.
+4. Open Stream’s Settings and add your compatible addon manifest URL.
 
-The library source, relinking, and checksum downloads are companion files for developers or people checking the release. They aren’t needed to run Stream.
+The library source, relinking, and checksum downloads alongside the app are for people rebuilding or checking the release. They aren’t needed to run Stream.
 
 ## What it does
 
-Browse catalogs, search your addons, save titles to a watchlist, and resume playback. Choose a source yourself or let Stream select one. Audio and subtitle selection are available where supported.
+Browse catalogs, explore movie genres and subgenres, search your addons, save titles to a watchlist, and resume playback. Title pages include cast, director, and writer links; each person's page has a filmography you can filter by role and genre. Choose a source yourself or let Stream select one. Audio and subtitle selection are available where supported.
 
 Right-click a Continue watching card to mark a movie or episode watched. Right-click a Watchlist title to remove it.
 
@@ -45,15 +43,15 @@ Remove tokens, private addon URLs, account information, and signed media links f
 
 ## Support development
 
-If you’d like to help, optional tips on [itch.io](https://streammac.itch.io/stream) go toward Apple Developer membership and continued development. Everyone gets the same features.
+If you’d like to help, optional tips on [itch.io](https://streammac.itch.io/stream) support continued development. Everyone gets the same features.
 
-I also have iOS and tvOS versions ready to submit once the membership is funded. Apple’s approval isn’t guaranteed, and there’s no promised release date. A tip doesn’t guarantee an iOS or Apple TV release.
+The source also builds for iOS and tvOS. Those versions are not included in the Mac download, and there is no promised App Store release date. Apple’s approval is not guaranteed.
 
 ## Source and third-party libraries
 
 Stream’s application source is available under the [MIT license](LICENSE). See [BUILDING.md](BUILDING.md) for local builds and [THIRD-PARTY.md](THIRD-PARTY.md) before distributing binaries.
 
-Third-party libraries retain their own licenses. License notices are included in the app. The matching library sources, patches, build information, and relinking materials are available alongside the app on [itch.io](https://streammac.itch.io/stream):
+Third-party libraries retain their own licenses. License notices are included in the app. The matching library sources, patches, build information, and relinking materials are available alongside each app download. For the current build, use its [GitHub release](https://github.com/chrishansen1984x-lang/stream/releases):
 
 - `Stream-Library-Sources.zip`
 - `Stream-Relinking.zip`
